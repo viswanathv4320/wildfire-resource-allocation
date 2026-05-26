@@ -1,0 +1,5 @@
+station,timestamp,temperature_c,wind_speed_mps,wind_dir_deg,humidity_pct,dewpoint_c,fire_name,fire_lat,fire_lon,discovery_acres,final_acres,county,fire_cause,fuel_group,fuel_model,fire_behavior,mgmt_complexity,estimated_cost
+E2137,2026-05-25T21:15:00+00:00,21.67,32.184,277.0,24.870198973993,0.71,NEWELL ROAD,45.830956,-120.458913,100.0,,Klickitat,Undetermined,,,Minimal,Type 2 Incident,9900000.0
+TALPE,2026-05-25T21:15:00+00:00,11.1,3.996,340.0,60.023605761446,3.63,SAWMILL CREEK,47.17772,-121.425,500.0,,King,Human,,,Active,Type 1 Incident,
+KYKM,2026-05-25T21:20:00+00:00,24.0,,,20.514620586595,0.0,SOUTH SLOPE,46.750129,-120.45663,100.0,,Yakima,Undetermined,,,Minimal,Type 4 Incident,1500000.0
+STRW1,2026-05-25T21:01:00+00:00,23.33,8.028,359.0,26.990213092882,3.27,CHIKAMIN,48.06893,-120.7687,30.0,,Chelan,Natural,Timber,TU5,Minimal,Type 4 Incident,3500000.0

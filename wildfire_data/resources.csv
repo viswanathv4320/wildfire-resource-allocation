@@ -1,0 +1,6 @@
+resource,units_available,acres_per_day,cost_per_day
+Type-1 Engine,45,3.5,4500
+Heavy Dozer,12,4.0,5800
+Type-1 Helicopter,3,100.0,30000
+Air Tanker,1,600.0,40000
+Hand Crew (20-person),20,2.0,11000

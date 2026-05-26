@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Runtime cache (SRTM tile cache, API response cache)
+cache/
+.cache/
+~/.cache/srtm/
+
+# Generated data outputs — recreated by running the pipeline
+wildfire_data/fire_weather.csv
+wildfire_data/dynamic_timeline.csv
+wildfire_data/asset_scores.csv
+wildfire_data/osm_assets.geojson
+wildfire_data/osm_assets_summary.csv
+
+# Spatial data folder — large generated files, fetched by fetch_osm_assets.py
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Streamlit secrets
+.streamlit/secrets.toml
