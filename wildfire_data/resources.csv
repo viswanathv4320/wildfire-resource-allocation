@@ -1,6 +1,6 @@
-resource,units_available,acres_per_day,cost_per_day
-Type-1 Engine,45,3.5,4500
-Heavy Dozer,12,4.0,5800
-Type-1 Helicopter,3,100.0,30000
-Air Tanker,1,600.0,40000
-Hand Crew (20-person),20,2.0,11000
+resource,units_available,cost_per_hour,acres_per_hour,productive_hours_per_day,source_note
+Type-1 Engine,45,400,0.35,10,NWCG PMS 437 fireline production rate; timber terrain
+Heavy Dozer,12,550,0.40,10,NWCG PMS 437 heavy dozer; conservative moderate-terrain estimate
+Type-1 Helicopter,3,4500,9.0,7,USFS 2020 flight rate chart ($4298-4900/hr); 8-10 ac/hr water drop effectiveness
+Air Tanker,1,7000,25.0,5,~$9700/day availability + $6500/hr flight (EU rate); ~36 ac/drop at 1-2 drops/hr
+Hand Crew (20-person),20,900,0.20,10,NWCG PMS 437 hand crew timber rate; ~1 chain/hr

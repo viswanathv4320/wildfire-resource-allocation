@@ -404,12 +404,17 @@ def run_optimizer(fires_df, resources, budget, asset_scores, horizon_hours, terr
     rnames = resources["resource"].tolist()
     ua     = dict(zip(rnames, resources["units_available"]))
 
-    if "acres_per_hour" in resources.columns:
+    # Use explicit per-hour rates directly — no /24 assumption
+    # resources.csv must have cost_per_hour and acres_per_hour columns
+    if "cost_per_hour" in resources.columns:
         aph_base = dict(zip(rnames, resources["acres_per_hour"]))
         cph      = dict(zip(rnames, resources["cost_per_hour"]))
     else:
-        aph_base = dict(zip(rnames, resources["acres_per_day"] / 24.0))
-        cph      = dict(zip(rnames, resources["cost_per_day"]  / 24.0))
+        raise ValueError(
+            "resources.csv must have 'cost_per_hour' and 'acres_per_hour' columns. "
+            "Dividing cost_per_day/24 assumes 24 productive hours which is unrealistic "
+            "for aircraft. Add explicit hourly rates instead."
+        )
 
     demand  = get_optimizer_demand(fires_df)
     danger  = dict(zip(fnames, fires_df["risk_score_100"]))
@@ -543,10 +548,8 @@ sorted_names     = fire_order
 rnames           = resources["resource"].tolist()
 ua_map           = dict(zip(rnames, resources["units_available"]))
 fnames           = fires_scored["fire_name"].tolist()
-aph_map          = dict(zip(rnames, resources["acres_per_hour"] if "acres_per_hour" in resources.columns
-                             else resources["acres_per_day"]/24.0))
-cph_map          = dict(zip(rnames, resources["cost_per_hour"] if "cost_per_hour" in resources.columns
-                             else resources["cost_per_day"]/24.0))
+aph_map          = dict(zip(rnames, resources["acres_per_hour"]))
+cph_map          = dict(zip(rnames, resources["cost_per_hour"]))
 
 
 # ════════════════════════════════════════════════════════════════════════════

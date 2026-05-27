@@ -379,12 +379,23 @@ def run_optimizer(fires: pd.DataFrame,
 
     units_available = dict(zip(resource_names, resources["units_available"]))
     # Support both old (per_day) and new (per_hour) resource CSVs
-    if "acres_per_day" in resources.columns:
-        acres_per_day = dict(zip(resource_names, resources["acres_per_day"]))
-        cost_per_day  = dict(zip(resource_names, resources["cost_per_day"]))
-    else:
-        acres_per_day = dict(zip(resource_names, resources["acres_per_hour"] * 24.0))
-        cost_per_day  = dict(zip(resource_names, resources["cost_per_hour"]  * 24.0))
+    # Use explicit per-hour rates — do not derive from per_day/24
+    # resources.csv must have cost_per_hour and acres_per_hour columns
+    if "cost_per_hour" not in resources.columns:
+        raise ValueError(
+            "resources.csv must have 'cost_per_hour' and 'acres_per_hour' columns. "
+            "Dividing cost_per_day/24 assumes 24 productive hours — unrealistic for aircraft."
+        )
+    # Convert to per-day equivalents using productive_hours_per_day for reporting only
+    prod_hrs = dict(zip(resource_names,
+                        resources["productive_hours_per_day"]
+                        if "productive_hours_per_day" in resources.columns
+                        else [10] * len(resource_names)))
+    acres_per_hour = dict(zip(resource_names, resources["acres_per_hour"]))
+    cost_per_hour  = dict(zip(resource_names, resources["cost_per_hour"]))
+    # Keep acres_per_day/cost_per_day as aliases for downstream reporting
+    acres_per_day  = {r: acres_per_hour[r] * prod_hrs[r] for r in resource_names}
+    cost_per_day   = {r: cost_per_hour[r]  * prod_hrs[r] for r in resource_names}
 
     # Demand hierarchy:
     #   1. incident_size_6h — 6h suppression demand (explicit operational workload)
@@ -1259,10 +1270,14 @@ def run_dynamic_allocation(fires_df: pd.DataFrame,
     """
     fire_names     = fires_df["fire_name"].tolist()
     resource_names = resources["resource"].tolist()
-    if "acres_per_day" in resources.columns:
-        acres_per_day = dict(zip(resource_names, resources["acres_per_day"]))
-    else:
-        acres_per_day = dict(zip(resource_names, resources["acres_per_hour"] * 24.0))
+    if "cost_per_hour" not in resources.columns:
+        raise ValueError("resources.csv must have cost_per_hour and acres_per_hour columns.")
+    prod_hrs_dyn = dict(zip(resource_names,
+                            resources["productive_hours_per_day"]
+                            if "productive_hours_per_day" in resources.columns
+                            else [10] * len(resource_names)))
+    acres_per_day = {r: resources.loc[resources["resource"]==r,"acres_per_hour"].values[0]
+                        * prod_hrs_dyn[r] for r in resource_names}
     fuel_mults     = {
         fire["fire_name"]: get_fuel_multiplier(
             fire.get("fuel_group"), fire.get("fire_behavior")
@@ -1541,12 +1556,12 @@ def run_resource_hour_optimizer(fires: pd.DataFrame,
 
     units_avail = dict(zip(resource_names, resources["units_available"]))
 
-    if "acres_per_hour" in resources.columns:
-        aph_base = dict(zip(resource_names, resources["acres_per_hour"]))
-        cph      = dict(zip(resource_names, resources["cost_per_hour"]))
-    else:
-        aph_base = dict(zip(resource_names, resources["acres_per_day"] / 24.0))
-        cph      = dict(zip(resource_names, resources["cost_per_day"]  / 24.0))
+    if "cost_per_hour" not in resources.columns:
+        raise ValueError(
+            "resources.csv must have 'cost_per_hour' and 'acres_per_hour' columns."
+        )
+    aph_base = dict(zip(resource_names, resources["acres_per_hour"]))
+    cph      = dict(zip(resource_names, resources["cost_per_hour"]))
 
     # Demand hierarchy
     if "incident_size_6h" in fires.columns and fires["incident_size_6h"].notna().any():

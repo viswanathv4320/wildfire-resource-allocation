@@ -160,6 +160,8 @@ This mirrors real operational triage logic: incident commanders sometimes accept
 
 **Linear cost model.** Within each fire, cost scales linearly with resource-hours. Fixed mobilization costs are not modeled.
 
+**Fireline production vs suppression.** The `acres_per_hour` values in `resources.csv` represent fireline production capacity per NWCG PMS 437, not direct fire area suppressed. An engine producing 0.35 ac/hr of fireline is not equivalent to extinguishing 0.35 acres of active fire. The model uses fireline production as a proxy for demand covered per resource-hour — a standard simplification in fire operations research but one that understates the nonlinearity of real suppression outcomes.
+
 **Static demand.** The 6h demand figure is fixed at scenario design time. The optimizer does not re-estimate containability mid-horizon (though Layer 3 dynamic reallocation partially addresses this).
 
 **K_SIZE calibration.** The effectiveness multiplier shape is derived from Holmes & Calkin (2013) empirical bounds (14–93% of standard rates) but the specific functional form `1/(1+K×size)` is an approximation. Sensitivity analysis over three K values is included.
@@ -180,8 +182,23 @@ This mirrors real operational triage logic: incident commanders sometimes accept
 | [NOAA weather.gov API](https://api.weather.gov) | Wind, temperature, humidity |
 | [OpenStreetMap via osmnx](https://osmnx.readthedocs.io) | Infrastructure assets |
 | [Open Elevation API](https://api.open-elevation.com) | SRTM terrain elevation |
+| [USFS Aviation Contracting](https://www.fs.usda.gov/managing-land/fire/contracting) | Helicopter hourly flight rates (2020 contract chart) |
 
 All sources are free, no API keys required.
+
+## Resource Cost Assumptions
+
+Resource costs and suppression capacities are modeled per productive resource-hour. This avoids assuming 24 productive operating hours per day, which is unrealistic especially for aircraft that have flight-time limits, turnaround, reloading, and daylight constraints.
+
+| Resource | Cost/hr | Acres/hr | Productive hrs/day | Basis |
+|---|---|---|---|---|
+| Type-1 Engine | $400 | 0.35 | 10 | USFS all-in daily estimate |
+| Heavy Dozer | $550 | 0.40 | 10 | USFS equipment rate |
+| Type-1 Helicopter | $4,500 | 4.2 | 7 | USFS 2020 flight rate chart (large helicopter $4,298–4,900/hr) |
+| Air Tanker | $7,000 | 25.0 | 5 | Conservative EU rate (~$9,700/day + $6,500/hr flight); 5h productive drops |
+| Hand Crew (20-person) | $900 | 0.20 | 10 | USFS labor + overhead estimate |
+
+These are planning estimates, not audited contract rates. Sensitivity analysis over budget and K_SIZE captures uncertainty in these assumptions.
 
 ---
 
@@ -232,3 +249,4 @@ streamlit run dashboard.py    # launches interactive dashboard
 | **Sensitivity** | Budget, λ, planning horizon, and K_SIZE sensitivity |
 
 Sidebar: adjust wind speed, humidity, temperature, budget, planning horizon, fire behavior overrides, infrastructure toggle. Model re-runs on every change.
+
