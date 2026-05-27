@@ -1,21 +1,15 @@
 """
-wildfire_triage.py  v5
+wildfire_triage.py
 Wildfire Resource Allocation Model — Risk Scoring + IP Optimizer + Spread Simulation
 
-v5 additions (layered on top of v4):
-  - Planning-horizon / resource-hours formulation (run_optimizer_v5)
+Final model components:
+  - AHP-derived risk scoring with absolute weather normalization
+  - Planning-horizon resource-hour MILP optimizer
+  - Cost plus risk-weighted residual damage objective
   - Terrain/access-adjusted ground resource effectiveness
-  - incident_size_6h demand hierarchy (6h suppression demand)
-  - Unified horizon/budget/lambda sensitivity using run_optimizer_v5
-  - All v4 layers preserved: dynamic allocation, ensemble, diurnal weather, sectoral suppression
-
-Changes from v1:
-  - AHP-derived weights (Saaty 1980) replacing heuristic weights
-  - Absolute meteorological normalization (NOAA Red Flag thresholds)
-  - Asset score removed from risk scoring — used only in IP objective (no double-counting)
-  - IP objective reframed as cost minimization: suppress_cost + lambda * residual_damage
-  - Soft penalty replaces hard >= 1 constraint (fixes infeasibility on large incident counts)
-  - Elliptical spread footprint for asset scoring (Dijkstra cells, not haversine circle)
+  - Nonlinear size-effectiveness multiplier for large fires
+  - Elliptical spread footprint for OSM asset exposure scoring
+  - Sensitivity analysis for budget, planning horizon, and risk preference
 
 Usage:
     python wildfire_triage.py
@@ -41,13 +35,12 @@ RESOURCES_CSV = "wildfire_data/resources.csv"
 # Budget calibration: with 1 air tanker ($40k), 3 helicopters ($90k), and scarce ground resources,
 # $150k creates genuine prioritization tension — not every fire can receive aviation.
 DAILY_BUDGET  = 150_000
-COVERAGE_CAP  = 2.0   # legacy — superseded by demand + max_unit_coverage cap in run_optimizer
 
-# v5: Planning-horizon formulation
-PLANNING_HORIZON_HOURS  = 6      # hours — replaces "daily" framing in run_optimizer_v5
+# Optimizer: Planning-horizon formulation
+PLANNING_HORIZON_HOURS  = 6      # hours — replaces "daily" framing in run_resource_hour_optimizer
 HORIZON_BUDGET          = 150_000  # budget for the planning horizon (not per day)
 
-# v5: Terrain effectiveness
+# Optimizer: Terrain effectiveness
 SLOPE_PENALTY            = 0.60   # fraction lost at 100% slope (ground resources)
 ROAD_PENALTY             = 0.30   # fraction lost at max road distance
 MAX_ROAD_KM              = 25.0   # road distance anchor
@@ -254,7 +247,16 @@ def compute_risk_scores(fires: pd.DataFrame,
     df["temperature_c"]  = df["temperature_c"].fillna(15.0)
 
     # ── Size: log-normalized within batch (relative sizing still valid)
-    df["size_score"] = np.log1p(df["discovery_acres"])
+    # Use same demand hierarchy as optimizer for size scoring
+    if "incident_size_6h" in df.columns and df["incident_size_6h"].notna().any():
+        size_basis = df["incident_size_6h"].fillna(df["discovery_acres"])
+    elif "incident_size" in df.columns and df["incident_size"].notna().any():
+        size_basis = df["incident_size"].fillna(df["discovery_acres"])
+    elif "current_acres" in df.columns:
+        size_basis = df["current_acres"]
+    else:
+        size_basis = df["discovery_acres"]
+    df["size_score"] = np.log1p(size_basis)
     df["size_score"] = (df["size_score"] / df["size_score"].max()).clip(0, 1)
 
     # ── Weather: nonlinear scaling anchored to NOAA Red Flag thresholds
@@ -385,18 +387,23 @@ def run_optimizer(fires: pd.DataFrame,
         cost_per_day  = dict(zip(resource_names, resources["cost_per_hour"]  * 24.0))
 
     # Demand hierarchy:
-    #   1. current_acres  — Layer 3 dynamic projection (if running mid-simulation)
-    #   2. incident_size  — operational footprint at scenario selection time
-    #   3. discovery_acres — detection size (fallback; often trivially small)
-    if "current_acres" in fires.columns:
-        demand     = dict(zip(fire_names, fires["current_acres"]))
-        demand_src = "current_acres"
-    elif "incident_size_6h" in fires.columns and fires["incident_size_6h"].notna().any():
+    #   1. incident_size_6h — 6h suppression demand (explicit operational workload)
+    #   2. incident_size    — operational footprint at scenario selection time
+    #   3. current_acres    — Layer 3 dynamic projection (fallback during simulation)
+    #   4. discovery_acres  — detection size (last resort; often trivially small)
+    #
+    # incident_size_6h is prioritised over current_acres because it is the
+    # explicitly designed demand figure for the planning horizon, not a live
+    # simulation projection that may not exist at scenario-design time.
+    if "incident_size_6h" in fires.columns and fires["incident_size_6h"].notna().any():
         demand     = dict(zip(fire_names, fires["incident_size_6h"].fillna(fires["discovery_acres"])))
         demand_src = "incident_size_6h (6h suppression demand)"
     elif "incident_size" in fires.columns and fires["incident_size"].notna().any():
         demand     = dict(zip(fire_names, fires["incident_size"].fillna(fires["discovery_acres"])))
         demand_src = "incident_size"
+    elif "current_acres" in fires.columns:
+        demand     = dict(zip(fire_names, fires["current_acres"]))
+        demand_src = "current_acres"
     else:
         demand     = dict(zip(fire_names, fires["discovery_acres"]))
         demand_src = "discovery_acres"
@@ -411,7 +418,7 @@ def run_optimizer(fires: pd.DataFrame,
     # Largest single-resource coverage per day — used for overcoverage cap
     max_unit_coverage = max(acres_per_day.values())
 
-    model = LpProblem("Wildfire_Triage_v4", LpMinimize)
+    model = LpProblem("Wildfire_Triage_Daily", LpMinimize)
 
     # x[r,f]: integer units dispatched
     x = {
@@ -1443,7 +1450,7 @@ def print_dynamic_report(timeline: pd.DataFrame, fire_names: list):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# v5: TERRAIN / ACCESS SCORING
+# Optimizer: TERRAIN / ACCESS SCORING
 # ════════════════════════════════════════════════════════════════════════════
 
 def compute_terrain_scores(fires: pd.DataFrame) -> dict:
@@ -1480,58 +1487,21 @@ def terrain_adjusted_capacity(base_aph: float,
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# v5: MILP OPTIMIZER — RESOURCE-HOURS FORMULATION
+# Optimizer: MILP OPTIMIZER — cost + residual damage minimization
+# Final MILP optimizer: cost + residual damage minimization
 # ════════════════════════════════════════════════════════════════════════════
 
-# ── Minimum response fractions by fire status ──────────────────────────────
-# These determine c[f] >= min_response[f] in the optimizer.
-# Active/Extreme/Type1 fires must receive at least a meaningful initial response.
-# Minimal fires get monitoring only (very small minimum).
-# Fractions are of demand — kept low so budget constraints still bind.
-MIN_RESPONSE_FRAC = {
-    "Extreme" : 0.20,   # at least 20% of 6h demand met
-    "Active"  : 0.15,
-    "Moderate": 0.08,
-    "Minimal" : 0.03,   # monitoring / token response
-}
-# Type 1/2 complexity boosts minimum by this fraction of demand
-COMPLEXITY_BOOST = {"Type 1 Incident": 0.05, "Type 2 Incident": 0.02}
-
-# ── Diminishing-returns tiers ───────────────────────────────────────────────
-# Response capacity is split into three tiers per fire.
-# Each tier has its own damage penalty weight — earlier tiers are valued more.
-# This prevents one fire from absorbing everything after its initial response.
-#
-# Tier 1: first TIER1_FRAC of demand      → highest penalty weight
-# Tier 2: TIER1_FRAC to TIER2_FRAC        → medium penalty weight
-# Tier 3: TIER2_FRAC to 100%              → lowest penalty weight
-#
-# The optimizer naturally fills high-value tiers across fires before
-# adding low-value tier 3 resources to any single fire.
-TIER1_FRAC = 0.25    # first 25% of demand — high marginal value
-TIER2_FRAC = 0.60    # 25–60% of demand   — medium marginal value
-# tier 3: 60–100% of demand               — lower marginal value
-
-# Tier penalty multipliers (applied to base λ × danger × asset × $500/ac)
-TIER1_WEIGHT = 3.0   # tier 1 unmet is 3× as costly as base
-TIER2_WEIGHT = 1.5   # tier 2 unmet is 1.5× as costly
-TIER3_WEIGHT = 0.6   # tier 3 unmet is 0.6× as costly (overcoverage not rewarded)
+# Nonlinear suppression effectiveness
+# Sources: Holmes & Calkin (2013) empirical bounds (14–93% of standard rates).
+# eff[f] = 1 / (1 + K_SIZE * demand[f])
+# At demand=100 ac  → eff ≈ 0.95  (near-standard productivity)
+# At demand=1800 ac → eff ≈ 0.82  (moderately degraded on a large fire)
+# At demand=50000 ac → eff ≈ 0.14  (severely degraded — very large fires)
+K_SIZE = 1.25e-4   # conservative default; sensitivity: 1.25e-4, 5e-4, 1e-3
+K_SIZE_VALUES = [1.25e-4, 5e-4, 1e-3]   # for sensitivity analysis
 
 
-def _min_response_acres(fire_row: pd.Series, demand_acres: float) -> float:
-    """
-    Compute minimum response capacity (acres) for a fire based on behavior
-    and complexity. Returns a floor that c[f] must meet.
-    Capped at 50% of demand so the minimum never forces infeasibility.
-    """
-    beh = str(fire_row.get("fire_behavior") or "Minimal").strip()
-    cpx = str(fire_row.get("mgmt_complexity") or "").strip()
-    frac = MIN_RESPONSE_FRAC.get(beh, MIN_RESPONSE_FRAC["Minimal"])
-    frac += COMPLEXITY_BOOST.get(cpx, 0.0)
-    return min(frac, 0.50) * demand_acres
-
-
-def run_optimizer_v5(fires: pd.DataFrame,
+def run_resource_hour_optimizer(fires: pd.DataFrame,
                      resources: pd.DataFrame,
                      asset_scores: dict = None,
                      budget: float = HORIZON_BUDGET,
@@ -1539,33 +1509,29 @@ def run_optimizer_v5(fires: pd.DataFrame,
                      terrain_scores: dict = None,
                      lam: float = None) -> dict:
     """
-    Planning-horizon MILP — resource-hours formulation with:
-      1. Terrain-adjusted ground resource effectiveness
-      2. Minimum initial response per fire (behavior + complexity driven)
-      3. Diminishing-returns response tiers per fire
-
-    Decision variables:
-      h[r,f]   ∈ Z≥0   resource-hours of type r assigned to fire f
-      c[f]     ≥ 0     total effective capacity assigned to fire f (acres)
-      t1[f]    ≥ 0     capacity in tier 1 (first 25% of demand) — high value
-      t2[f]    ≥ 0     capacity in tier 2 (25–60% of demand)    — medium value
-      t3[f]    ≥ 0     capacity in tier 3 (60–100% of demand)   — lower value
-      u1/u2/u3[f] ≥ 0  unmet demand in each tier
+    Planning-horizon MILP — cost + residual damage minimization.
 
     Objective:
-      min  Σ cph[r] × h[r,f]
-         + λ × Σ_f (danger[f]/100) × (asset[f]/10) × $500/ac ×
-               (TIER1_WEIGHT×u1[f] + TIER2_WEIGHT×u2[f] + TIER3_WEIGHT×u3[f])
+        min  Σ_{r,f} cph[r] × h[r,f]
+           + λ × Σ_f (danger[f]/100) × (asset[f]/10) × u[f] × DAMAGE_COST_PER_ACRE
 
-    Key constraints:
-      C1  Supply:      Σ_f h[r,f] ≤ units[r] × horizon_hours  ∀r
-      C2  Budget:      Σ_{r,f} cph[r]×h[r,f] ≤ B
-      C3  Capacity:    c[f] = Σ_r aph_eff[r,f]×h[r,f]
-      C4  Tier split:  c[f] = t1[f] + t2[f] + t3[f]
-      C5  Tier caps:   t1[f] ≤ T1_cap[f]; t2[f] ≤ T2_cap[f]; t3[f] ≤ T3_cap[f]
-      C6  Unmet tiers: u1[f] = T1_cap[f] - t1[f]; same for u2, u3
-      C7  Min response: c[f] ≥ min_response[f]  (soft via penalty when infeasible)
-      C8  Overcap:     c[f] ≤ demand[f] + max_single_aph
+    Decision variables:
+        h[r,f]  ∈ Z≥0   resource-hours of type r assigned to fire f
+        c[f]    ≥ 0     effective acres covered at fire f
+        u[f]    ≥ 0     uncovered acres at fire f (slack)
+
+    Coverage includes nonlinear size-effectiveness multiplier:
+        eff[f] = 1 / (1 + K_SIZE × demand[f])
+        c[f] = Σ_r aph_eff[r,f] × eff[f] × h[r,f]
+
+    Constraints:
+        C1  Supply  : Σ_f h[r,f] ≤ units[r] × horizon_hours        ∀ r
+        C2  Budget  : Σ_{r,f} cph[r] × h[r,f] ≤ B
+        C3  Coverage: c[f] = Σ_r aph_eff[r,f] × eff[f] × h[r,f]   ∀ f
+        C4  Uncovered: u[f] ≥ demand[f] − c[f]                     ∀ f
+        C5  Overcap : c[f] ≤ demand[f] + max_single_aph             ∀ f
+
+    Demand hierarchy: incident_size_6h > incident_size > current_acres > discovery_acres
     """
     if lam is None:
         lam = LAMBDA_DAMAGE
@@ -1583,123 +1549,80 @@ def run_optimizer_v5(fires: pd.DataFrame,
         cph      = dict(zip(resource_names, resources["cost_per_day"]  / 24.0))
 
     # Demand hierarchy
-    if "current_acres" in fires.columns:
-        demand = dict(zip(fire_names, fires["current_acres"]))
-    elif "incident_size_6h" in fires.columns and fires["incident_size_6h"].notna().any():
-        demand = dict(zip(fire_names,
-                          fires["incident_size_6h"].fillna(fires["discovery_acres"])))
+    if "incident_size_6h" in fires.columns and fires["incident_size_6h"].notna().any():
+        demand     = dict(zip(fire_names, fires["incident_size_6h"].fillna(fires["discovery_acres"])))
+        demand_src = "incident_size_6h"
     elif "incident_size" in fires.columns and fires["incident_size"].notna().any():
-        demand = dict(zip(fire_names,
-                          fires["incident_size"].fillna(fires["discovery_acres"])))
+        demand     = dict(zip(fire_names, fires["incident_size"].fillna(fires["discovery_acres"])))
+        demand_src = "incident_size"
+    elif "current_acres" in fires.columns:
+        demand     = dict(zip(fire_names, fires["current_acres"]))
+        demand_src = "current_acres"
     else:
-        demand = dict(zip(fire_names, fires["discovery_acres"]))
+        demand     = dict(zip(fire_names, fires["discovery_acres"]))
+        demand_src = "discovery_acres"
 
     danger  = dict(zip(fire_names, fires["risk_score_100"]))
     asset   = asset_scores or {f: 5.0 for f in fire_names}
     tscores = terrain_scores or {f: 0.5 for f in fire_names}
 
-    # Terrain-adjusted acres per hour
+    # Terrain-adjusted acres per hour (ground resources only)
     aph_eff = {(r, f): terrain_adjusted_capacity(aph_base[r], tscores.get(f, 0.5), r)
                for r in resource_names for f in fire_names}
+
+    # Nonlinear size effectiveness multiplier per fire
+    eff = {f: 1.0 / (1.0 + K_SIZE * demand[f]) for f in fire_names}
 
     max_rh     = {r: units_avail[r] * horizon_hours for r in resource_names}
     max_single = max(aph_base.values())
 
-    # Per-fire tier capacity caps and minimum response
-    tier1_cap  = {f: TIER1_FRAC * demand[f] for f in fire_names}
-    tier2_cap  = {f: (TIER2_FRAC - TIER1_FRAC) * demand[f] for f in fire_names}
-    tier3_cap  = {f: (1.0 - TIER2_FRAC) * demand[f] for f in fire_names}
-    fire_rows  = fires.set_index("fire_name")
-    min_resp   = {f: _min_response_acres(fire_rows.loc[f], demand[f]) for f in fire_names}
+    m = LpProblem("Wildfire_Triage__MinCost", LpMinimize)
 
-    # Total available resource capacity (for feasibility check)
-    total_aph_capacity = sum(
-        aph_eff[(r, f)] * units_avail[r] * horizon_hours
-        for r in resource_names for f in fire_names
-    )
-    # If minimum responses sum exceeds total capacity, scale them down
-    total_min = sum(min_resp.values())
-    if total_min > total_aph_capacity * 0.9:
-        scale = (total_aph_capacity * 0.9) / total_min
-        min_resp = {f: v * scale for f, v in min_resp.items()}
-
-    m = LpProblem("Wildfire_Triage_v5_DR", LpMinimize)
-
-    # Resource-hours decision variables
     h = {(r, f): LpVariable(
             f"h_{r.replace(' ','_').replace('-','_')}_{f.replace(' ','_').replace('-','_')}",
             lowBound=0, cat="Integer")
          for r in resource_names for f in fire_names}
 
-    # Coverage and tier variables (continuous)
-    c  = {f: LpVariable(f"c_{f.replace(' ','_').replace('-','_')}",  lowBound=0) for f in fire_names}
-    t1 = {f: LpVariable(f"t1_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fire_names}
-    t2 = {f: LpVariable(f"t2_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fire_names}
-    t3 = {f: LpVariable(f"t3_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fire_names}
-    u1 = {f: LpVariable(f"u1_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fire_names}
-    u2 = {f: LpVariable(f"u2_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fire_names}
-    u3 = {f: LpVariable(f"u3_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fire_names}
+    c = {f: LpVariable(f"c_{f.replace(' ','_').replace('-','_')}", lowBound=0)
+         for f in fire_names}
 
-    # Objective: suppress cost + tier-weighted residual damage
-    suppress_cost = lpSum(cph[r] * h[(r, f)] for r in resource_names for f in fire_names)
-    tier_damage   = lpSum(
-        lam * (danger[f] / 100.0) * (asset.get(f, 5.0) / 10.0) * DAMAGE_COST_PER_ACRE *
-        (TIER1_WEIGHT * u1[f] + TIER2_WEIGHT * u2[f] + TIER3_WEIGHT * u3[f])
+    u = {f: LpVariable(f"u_{f.replace(' ','_').replace('-','_')}", lowBound=0)
+         for f in fire_names}
+
+    # Objective: suppression cost + λ × residual damage
+    suppression_cost = lpSum(cph[r] * h[(r, f)]
+                             for r in resource_names for f in fire_names)
+    residual_damage  = lpSum(
+        lam * (danger[f] / 100.0) * (asset.get(f, 5.0) / 10.0) * u[f] * DAMAGE_COST_PER_ACRE
         for f in fire_names
     )
-    m += suppress_cost + tier_damage
+    m += suppression_cost + residual_damage
 
     # C1: resource-hour supply
     for r in resource_names:
         m += lpSum(h[(r, f)] for f in fire_names) <= max_rh[r]
 
     # C2: budget
-    m += lpSum(cph[r] * h[(r, f)] for r in resource_names for f in fire_names) <= budget
+    total_cost_expr = lpSum(cph[r] * h[(r, f)]
+                            for r in resource_names for f in fire_names)
+    m += total_cost_expr <= budget
 
     for f in fire_names:
-        # C3: capacity definition
-        m += c[f] == lpSum(aph_eff[(r, f)] * h[(r, f)] for r in resource_names)
-
-        # C4: tier split
-        m += c[f] == t1[f] + t2[f] + t3[f]
-
-        # C5: tier caps
-        m += t1[f] <= tier1_cap[f]
-        m += t2[f] <= tier2_cap[f]
-        m += t3[f] <= tier3_cap[f]
-
-        # C6: unmet demand per tier (fills from bottom up — optimizer fills t1 first
-        #     because u1 has the highest penalty weight)
-        m += u1[f] == tier1_cap[f] - t1[f]
-        m += u2[f] == tier2_cap[f] - t2[f]
-        m += u3[f] == tier3_cap[f] - t3[f]
-
-        # C7: minimum initial response (hard constraint)
-        m += c[f] >= min_resp[f]
-
-        # C8: overcoverage cap
+        # C3: coverage with size-effectiveness multiplier
+        m += c[f] == lpSum(aph_eff[(r, f)] * eff[f] * h[(r, f)]
+                           for r in resource_names)
+        # C4: uncovered slack
+        m += u[f] >= demand[f] - c[f]
+        # C5: overcoverage cap
         m += c[f] <= demand[f] + max_single
 
     m.solve(PULP_CBC_CMD(msg=0))
 
-    alloc    = {(r, f): int(value(h[(r, f)]) or 0) for r in resource_names for f in fire_names}
+    alloc    = {(r, f): int(value(h[(r, f)]) or 0)
+                for r in resource_names for f in fire_names}
     coverage = {f: float(value(c[f]) or 0) for f in fire_names}
-    uncov    = {f: max(demand[f] - coverage[f], 0.0) for f in fire_names}
-    cost     = {f: sum(alloc[(r, f)] * cph[r] for r in resource_names) for f in fire_names}
-
-    # Tier fill breakdown for reporting
-    tier_fill = {
-        f: {
-            "t1": float(value(t1[f]) or 0),
-            "t2": float(value(t2[f]) or 0),
-            "t3": float(value(t3[f]) or 0),
-            "t1_cap": tier1_cap[f],
-            "t2_cap": tier2_cap[f],
-            "t3_cap": tier3_cap[f],
-            "min_resp": min_resp[f],
-        }
-        for f in fire_names
-    }
+    uncov    = {f: float(value(u[f]) or 0) for f in fire_names}
+    cost_h   = {f: sum(alloc[(r, f)] * cph[r] for r in resource_names) for f in fire_names}
 
     return {
         "status"         : LpStatus[m.status],
@@ -1707,22 +1630,24 @@ def run_optimizer_v5(fires: pd.DataFrame,
         "allocation"     : alloc,
         "coverage"       : coverage,
         "uncovered"      : uncov,
-        "horizon_cost"   : cost,
-        "tier_fill"      : tier_fill,
+        "horizon_cost"   : cost_h,
         "fire_names"     : fire_names,
         "resource_names" : resource_names,
         "acres_per_hour" : aph_eff,
         "cost_per_hour"  : cph,
         "demand"         : demand,
+        "demand_src"     : demand_src,
         "risk_scores"    : danger,
         "asset_scores"   : asset,
         "terrain_scores" : tscores,
         "horizon_hours"  : horizon_hours,
+        "budget"         : budget,
+        "eff"            : eff,
     }
 
 
-def print_allocation_report_v5(result: dict, fires: pd.DataFrame):
-    """Print resource-hours allocation report (v5 formulation)."""
+def print_resource_hour_allocation_report(result: dict, fires: pd.DataFrame):
+    """Print resource-hours allocation report ( formulation)."""
     fnames    = result["fire_names"]
     rnames    = result["resource_names"]
     alloc     = result["allocation"]
@@ -1737,9 +1662,9 @@ def print_allocation_report_v5(result: dict, fires: pd.DataFrame):
     rank_map  = dict(zip(fires["fire_name"], fires["priority_rank"]))
 
     print("\n" + "=" * 70)
-    print(f"  LAYER 2v5 — RESOURCE-HOURS OPTIMIZER  [{result['status']}]")
-    print(f"  Planning horizon : {hz}h   |   Budget: ${HORIZON_BUDGET:,}")
-    print(f"  Objective (suppress cost + λ×residual damage): {result['objective']:,.0f}")
+    print(f"  LAYER 2 — RESOURCE-HOURS OPTIMIZER  [{result['status']}]")
+    print(f"  Planning horizon : {hz}h   |   Budget: ${result.get("budget", HORIZON_BUDGET):,}")
+    print(f"  Objective (suppression cost + λ×residual damage, lower=better): {result['objective']:.4f}")
     print("=" * 70)
 
     print("\n── Resource-hours dispatched (h[r,f]) ──────────────────────────────")
@@ -1761,17 +1686,11 @@ def print_allocation_report_v5(result: dict, fires: pd.DataFrame):
                   (asset.get(f,5.0)/10.0) * uncov[f] * DAMAGE_COST_PER_ACRE)
         rh_parts = [f"{r.split('(')[0].strip()}: {alloc[(r,f)]}h"
                     for r in rnames if alloc[(r,f)] > 0]
-        tf       = result.get("tier_fill", {}).get(f, {})
-        mr       = tf.get("min_resp", 0)
-        t1v, t2v, t3v = tf.get("t1",0), tf.get("t2",0), tf.get("t3",0)
-        t1c, t2c, t3c = tf.get("t1_cap",0), tf.get("t2_cap",0), tf.get("t3_cap",0)
         print(f"\n  #{rank_map[f]}  {f}  "
               f"(danger={danger[f]:.1f}/100  asset={asset.get(f,5.0):.1f}/10  "
               f"terrain={ts:.2f})")
-        print(f"      Demand          : {dem:,.0f} ac  (min response: {mr:.0f} ac)")
+        print(f"      Demand (6h)     : {dem:,.0f} ac")
         print(f"      Response demand met: {pct:.0f}%  ({cov:,.0f} ac assigned)")
-        print(f"      Tier fill       : T1={t1v:.0f}/{t1c:.0f}ac  "
-              f"T2={t2v:.0f}/{t2c:.0f}ac  T3={t3v:.0f}/{t3c:.0f}ac")
         print(f"      Unmet demand    : {uncov[f]:,.0f} ac"
               f"{'  ← expected for lower priority' if pct < 30 else ''}")
         print(f"      Residual damage : ${dmg:,.0f}")
@@ -1784,16 +1703,16 @@ def print_allocation_report_v5(result: dict, fires: pd.DataFrame):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# v5: UNIFIED SENSITIVITY ANALYSES (horizon + lambda + budget via run_optimizer_v5)
+# Optimizer: UNIFIED SENSITIVITY ANALYSES (horizon + lambda + budget via run_resource_hour_optimizer)
 # ════════════════════════════════════════════════════════════════════════════
 
-def horizon_sensitivity(fires: pd.DataFrame,
+def planning_horizon_sensitivity(fires: pd.DataFrame,
                          resources: pd.DataFrame,
                          asset_scores: dict = None,
                          terrain_scores: dict = None) -> None:
-    """Sweep planning horizon [2,4,6,8,12]h using unified run_optimizer_v5."""
+    """Sweep planning horizon [2,4,6,8,12]h using unified run_resource_hour_optimizer."""
     print("\n" + "=" * 65)
-    print("  SENSITIVITYv5: Planning Horizon")
+    print("  SENSITIVITYOptimizer: Planning Horizon")
     print("=" * 65)
     demand = {}
     if "incident_size_6h" in fires.columns and fires["incident_size_6h"].notna().any():
@@ -1809,7 +1728,7 @@ def horizon_sensitivity(fires: pd.DataFrame,
     for f in fires["fire_name"]:
         print(f"  {f:<20}", end="")
         for h in horizons:
-            r = run_optimizer_v5(fires, resources, asset_scores=asset_scores,
+            r = run_resource_hour_optimizer(fires, resources, asset_scores=asset_scores,
                                   terrain_scores=terrain_scores, horizon_hours=h)
             dem = demand.get(f, 1)
             pct = min(r["coverage"][f] / dem * 100, 100) if dem > 0 else 0
@@ -1817,13 +1736,13 @@ def horizon_sensitivity(fires: pd.DataFrame,
         print()
 
 
-def budget_sensitivity_v5(fires: pd.DataFrame,
+def budget_sensitivity(fires: pd.DataFrame,
                             resources: pd.DataFrame,
                             asset_scores: dict = None,
                             terrain_scores: dict = None) -> None:
-    """Sweep budget values using unified run_optimizer_v5."""
+    """Sweep budget values using unified run_resource_hour_optimizer."""
     print("\n" + "=" * 65)
-    print("  SENSITIVITYv5: Budget for Planning Horizon")
+    print("  SENSITIVITYOptimizer: Budget for Planning Horizon")
     print("=" * 65)
     demand = {}
     if "incident_size_6h" in fires.columns and fires["incident_size_6h"].notna().any():
@@ -1839,7 +1758,7 @@ def budget_sensitivity_v5(fires: pd.DataFrame,
     for f in fires["fire_name"]:
         print(f"  {f:<20}", end="")
         for b in budgets:
-            r = run_optimizer_v5(fires, resources, asset_scores=asset_scores,
+            r = run_resource_hour_optimizer(fires, resources, asset_scores=asset_scores,
                                   terrain_scores=terrain_scores, budget=b)
             dem = demand.get(f, 1)
             pct = min(r["coverage"][f] / dem * 100, 100) if dem > 0 else 0
@@ -1945,7 +1864,7 @@ def lambda_sensitivity(fires: pd.DataFrame,
 
 if __name__ == "__main__":
     print("\n" + "=" * 65)
-    print("  WILDFIRE TRIAGE MODEL  v4")
+    print("  WILDFIRE TRIAGE MODEL")
     print("  Suppression Feedback · Dynamic Weather · Ensemble Uncertainty · Slope Terrain")
     print("=" * 65)
 
@@ -2017,40 +1936,9 @@ if __name__ == "__main__":
         rank = fires.loc[fires["fire_name"]==f, "priority_rank"].values[0]
         print(f"  #{rank}  {f:<20}  asset_score={score:.2f}")
 
-    # Layer 2: IP optimizer
-    result = run_optimizer(fires, resources,
-                           asset_scores=asset_scores,
-                           budget=DAILY_BUDGET if "acres_per_day" in resources.columns else HORIZON_BUDGET)
-    print_allocation_report(result, fires, resources)
-
-    # C: Ensemble uncertainty bands (highest-priority fire as demo)
-    top_fire = fires.sort_values("priority_rank").iloc[0]
-    print(f"\n── Layer 3C: Spread Uncertainty Ensemble ({top_fire['fire_name']}) ───")
-    print(f"  {N_ENSEMBLE} runs × 3 scenarios (optimistic / expected / worst-case)")
-    print(f"  Wind ±{ENSEMBLE_WIND_NOISE*100:.0f}%  |  Humidity ±{ENSEMBLE_HUMIDITY_NOISE:.0f}%  |  Fuel ±{ENSEMBLE_FUEL_NOISE*100:.0f}%")
-    ensemble = run_spread_ensemble(
-        top_fire, t_hours=12,
-        slope_field=slope_fields[top_fire["fire_name"]],
-        suppression_factor=0.0,
-    )
-    for scen, res in ensemble.items():
-        print(f"  {scen:<12}  p10={res['p10_acres']:,.0f}ac  "
-              f"p50={res['p50_acres']:,.0f}ac  p90={res['p90_acres']:,.0f}ac")
-
-    # Layer 3: Dynamic spread + rolling reallocation with full feedback
-    print("\n── Layer 3: Dynamic Reallocation (A+B feedback active) ─────")
-    timeline, _, _ = run_dynamic_allocation(
-        fires, resources, weights,
-        asset_scores=asset_scores,
-        prebuilt_graphs=spread_graphs,
-        slope_fields=slope_fields,
-    )
-    print_dynamic_report(timeline, fires["fire_name"].tolist())
-    timeline.to_csv("wildfire_data/dynamic_timeline.csv", index=False)
-    print("\n  Saved timeline → wildfire_data/dynamic_timeline.csv")
-
-    # ── v5: Terrain scoring + resource-hours optimizer ──────────────────
-    print("\n── v5: Terrain / Access Scoring ─────────────────────────────────")
+    # Final optimizer uses resource-hours over the planning horizon.
+    # ── Terrain scoring + resource-hour optimizer ──────────────────
+    print("\n── Terrain / Access Scoring ─────────────────────────────────")
     terrain_scores = compute_terrain_scores(fires)
     for name, ts in terrain_scores.items():
         slope = float(fires.loc[fires["fire_name"]==name, "terrain_slope_pct"].values[0]) \
@@ -2059,19 +1947,15 @@ if __name__ == "__main__":
                 if "road_distance_km" in fires.columns else float("nan")
         print(f"  {name:<22}  slope={slope:.0f}%  road={road:.1f}km  access={ts:.2f}")
 
-    print("\n── v5: Resource-Hours Optimizer ─────────────────────────────────")
-    result_v5 = run_optimizer_v5(fires, resources,
+    print("\n── Resource-Hour Optimizer ─────────────────────────────────")
+    result_opt = run_resource_hour_optimizer(fires, resources,
                                   asset_scores=asset_scores,
                                   terrain_scores=terrain_scores)
-    print_allocation_report_v5(result_v5, fires)
+    print_resource_hour_allocation_report(result_opt, fires)
 
-    # Sensitivity analyses (v4)
-    complexity_sensitivity(fires, resources, weights, asset_scores)
-    lambda_sensitivity(fires, resources, asset_scores)
-
-    # Sensitivity analyses (v5 — unified optimizer)
-    horizon_sensitivity(fires, resources, asset_scores, terrain_scores)
-    budget_sensitivity_v5(fires, resources, asset_scores, terrain_scores)
+    # Sensitivity analyses using the final resource-hour optimizer
+    planning_horizon_sensitivity(fires, resources, asset_scores, terrain_scores)
+    budget_sensitivity(fires, resources, asset_scores, terrain_scores)
 
     print("\n" + "=" * 65)
     print("  Done.")

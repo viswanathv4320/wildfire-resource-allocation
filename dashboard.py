@@ -159,7 +159,7 @@ WEATHER_W_TEMP     = 0.25
 LAMBDA_DAMAGE = 50.0
 DAMAGE_COST_PER_ACRE = 500.0
 
-# v5: Terrain effectiveness
+# Optimizer: Terrain effectiveness
 SLOPE_PENALTY            = 0.60
 ROAD_PENALTY             = 0.30
 MAX_ROAD_KM              = 25.0
@@ -342,19 +342,22 @@ def compute_risk(fires_df):
 
 
 def get_demand(fires_df):
+    """Demand hierarchy: incident_size_6h > incident_size > current_acres > discovery_acres."""
     fnames = fires_df["fire_name"].tolist()
-    if "current_acres" in fires_df.columns:
-        return dict(zip(fnames, fires_df["current_acres"]))
+    if "incident_size_6h" in fires_df.columns and fires_df["incident_size_6h"].notna().any():
+        return dict(zip(fnames, fires_df["incident_size_6h"].fillna(fires_df["discovery_acres"])))
     elif "incident_size" in fires_df.columns and fires_df["incident_size"].notna().any():
         return dict(zip(fnames, fires_df["incident_size"].fillna(fires_df["discovery_acres"])))
+    elif "current_acres" in fires_df.columns:
+        return dict(zip(fnames, fires_df["current_acres"]))
     return dict(zip(fnames, fires_df["discovery_acres"]))
 
 
-# run_ip (v4 daily optimizer) removed — all tabs now use run_ip_v5
+# All dashboard tabs use the same resource-hour optimizer
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# v5: TERRAIN HELPERS
+# Optimizer: TERRAIN HELPERS
 # ════════════════════════════════════════════════════════════════════════════
 
 def compute_terrain_scores_dash(fires_df: pd.DataFrame) -> dict:
@@ -377,7 +380,7 @@ def terrain_adj_cap(base_aph: float, terrain_score: float, resource: str) -> flo
     return base_aph * eff
 
 
-def get_demand_v5(fires_df: pd.DataFrame) -> dict:
+def get_optimizer_demand(fires_df: pd.DataFrame) -> dict:
     """Demand hierarchy: incident_size_6h > incident_size > discovery_acres."""
     fnames = fires_df["fire_name"].tolist()
     if "incident_size_6h" in fires_df.columns and fires_df["incident_size_6h"].notna().any():
@@ -389,35 +392,17 @@ def get_demand_v5(fires_df: pd.DataFrame) -> dict:
     return dict(zip(fnames, s.values))
 
 
-# ── Minimum response fractions (mirrored from wildfire_triage.py) ───────────
-_MIN_RESP_FRAC   = {"Extreme":0.20,"Active":0.15,"Moderate":0.08,"Minimal":0.03}
-_COMPLEXITY_BOOST= {"Type 1 Incident":0.05,"Type 2 Incident":0.02}
-_TIER1_FRAC      = 0.25
-_TIER2_FRAC      = 0.60
-_TIER1_W         = 3.0
-_TIER2_W         = 1.5
-_TIER3_W         = 0.6
-
-def _min_resp_acres(fire_row, demand_acres):
-    beh  = str(fire_row.get("fire_behavior") or "Minimal").strip()
-    cpx  = str(fire_row.get("mgmt_complexity") or "").strip()
-    frac = _MIN_RESP_FRAC.get(beh, _MIN_RESP_FRAC["Minimal"])
-    frac += _COMPLEXITY_BOOST.get(cpx, 0.0)
-    return min(frac, 0.50) * demand_acres
-
-
-def run_ip_v5(fires_df, resources, budget, asset_scores, horizon_hours, terrain_scores, lam=None):
+def run_optimizer(fires_df, resources, budget, asset_scores, horizon_hours, terrain_scores, lam=None):
     """
-    v5 optimizer: resource-hours + terrain-adjusted effectiveness
-    + minimum initial response + diminishing-returns response tiers.
-
-    Returns (alloc, coverage, cost, status, objective, uncov, demand, tier_fill)
+    Optimizer: minimize suppression cost + λ × residual damage.
+    Uses nonlinear size-effectiveness multiplier (default K_SIZE = 1.25e-4).
+    Returns allocation, coverage, cost, solver status, objective, uncovered acres, demand, and diagnostics.
     """
     if lam is None:
         lam = LAMBDA_DAMAGE
     fnames = fires_df["fire_name"].tolist()
     rnames = resources["resource"].tolist()
-    ua  = dict(zip(rnames, resources["units_available"]))
+    ua     = dict(zip(rnames, resources["units_available"]))
 
     if "acres_per_hour" in resources.columns:
         aph_base = dict(zip(rnames, resources["acres_per_hour"]))
@@ -426,7 +411,7 @@ def run_ip_v5(fires_df, resources, budget, asset_scores, horizon_hours, terrain_
         aph_base = dict(zip(rnames, resources["acres_per_day"] / 24.0))
         cph      = dict(zip(rnames, resources["cost_per_day"]  / 24.0))
 
-    demand  = get_demand_v5(fires_df)
+    demand  = get_optimizer_demand(fires_df)
     danger  = dict(zip(fnames, fires_df["risk_score_100"]))
     ascore  = asset_scores or {f: 5.0 for f in fnames}
     tscores = terrain_scores or {f: 0.5 for f in fnames}
@@ -436,54 +421,42 @@ def run_ip_v5(fires_df, resources, budget, asset_scores, horizon_hours, terrain_
     max_rh     = {r: ua[r] * horizon_hours for r in rnames}
     max_single = max(aph_base.values())
 
-    # Tier caps and minimum response
-    tier1_cap = {f: _TIER1_FRAC * demand[f] for f in fnames}
-    tier2_cap = {f: (_TIER2_FRAC - _TIER1_FRAC) * demand[f] for f in fnames}
-    tier3_cap = {f: (1.0 - _TIER2_FRAC) * demand[f] for f in fnames}
-    fire_idx  = fires_df.set_index("fire_name")
-    min_resp  = {f: _min_resp_acres(fire_idx.loc[f], demand[f]) for f in fnames}
+    # Nonlinear size-effectiveness multiplier
+    # eff[f] = 1 / (1 + K_SIZE * demand[f])
+    # Holmes & Calkin (2013): empirical rates 14-93% of standard on large fires
+    K_SIZE = 1.25e-4
+    eff = {f: 1.0 / (1.0 + K_SIZE * demand[f]) for f in fnames}
 
-    # Scale minimums if total exceeds available capacity
-    total_cap = sum(aph_eff[(r,f)] * ua[r] * horizon_hours for r in rnames for f in fnames)
-    total_min = sum(min_resp.values())
-    if total_min > total_cap * 0.9:
-        scale    = (total_cap * 0.9) / total_min
-        min_resp = {f: v * scale for f, v in min_resp.items()}
+    m = LpProblem("triage_mincost", LpMinimize)
 
-    m = LpProblem("triage_v5_dr", LpMinimize)
+    h = {(r,f): LpVariable(
+            f"h_{r.replace(' ','_').replace('-','_')}_{f.replace(' ','_').replace('-','_')}",
+            lowBound=0, cat="Integer")
+         for r in rnames for f in fnames}
+    c = {f: LpVariable(f"c_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fnames}
+    u = {f: LpVariable(f"u_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fnames}
 
-    h  = {(r,f): LpVariable(f"h_{r.replace(' ','_').replace('-','_')}_{f.replace(' ','_').replace('-','_')}",
-                             lowBound=0, cat="Integer") for r in rnames for f in fnames}
-    c  = {f: LpVariable(f"c_{f.replace(' ','_').replace('-','_')}",  lowBound=0) for f in fnames}
-    t1 = {f: LpVariable(f"t1_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fnames}
-    t2 = {f: LpVariable(f"t2_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fnames}
-    t3 = {f: LpVariable(f"t3_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fnames}
-    u1 = {f: LpVariable(f"u1_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fnames}
-    u2 = {f: LpVariable(f"u2_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fnames}
-    u3 = {f: LpVariable(f"u3_{f.replace(' ','_').replace('-','_')}", lowBound=0) for f in fnames}
+    # Objective: suppression cost + λ × residual damage
+    total_cost_expr = lpSum(cph[r]*h[(r,f)] for r in rnames for f in fnames)
+    residual_damage = lpSum(
+        lam * (danger[f]/100.0) * (ascore.get(f,5.0)/10.0) * u[f] * DAMAGE_COST_PER_ACRE
+        for f in fnames
+    )
+    m += total_cost_expr + residual_damage
 
-    # Objective: suppress cost + tier-weighted residual damage
-    m += (lpSum(cph[r]*h[(r,f)] for r in rnames for f in fnames) +
-          lpSum(lam*(danger[f]/100.0)*(ascore.get(f,5.0)/10.0)*DAMAGE_COST_PER_ACRE *
-                (_TIER1_W*u1[f] + _TIER2_W*u2[f] + _TIER3_W*u3[f])
-                for f in fnames))
-
-    # Supply + budget
+    # C1: supply
     for r in rnames:
         m += lpSum(h[(r,f)] for f in fnames) <= max_rh[r]
-    m += lpSum(cph[r]*h[(r,f)] for r in rnames for f in fnames) <= budget
+    # C2: budget
+    m += total_cost_expr <= budget
 
     for f in fnames:
-        m += c[f]  == lpSum(aph_eff[(r,f)]*h[(r,f)] for r in rnames)  # capacity def
-        m += c[f]  == t1[f] + t2[f] + t3[f]                           # tier split
-        m += t1[f] <= tier1_cap[f]                                     # tier caps
-        m += t2[f] <= tier2_cap[f]
-        m += t3[f] <= tier3_cap[f]
-        m += u1[f] == tier1_cap[f] - t1[f]                            # unmet per tier
-        m += u2[f] == tier2_cap[f] - t2[f]
-        m += u3[f] == tier3_cap[f] - t3[f]
-        m += c[f]  >= min_resp[f]                                      # min response
-        m += c[f]  <= demand[f] + max_single                           # overcap
+        # C3: coverage with size-effectiveness multiplier
+        m += c[f] == lpSum(aph_eff[(r,f)] * eff[f] * h[(r,f)] for r in rnames)
+        # C4: uncovered slack
+        m += u[f] >= demand[f] - c[f]
+        # C5: overcoverage cap
+        m += c[f] <= demand[f] + max_single
 
     m.solve(PULP_CBC_CMD(msg=0))
 
@@ -491,13 +464,9 @@ def run_ip_v5(fires_df, resources, budget, asset_scores, horizon_hours, terrain_
     coverage = {f:float(value(c[f]) or 0) for f in fnames}
     cost_h   = {f:sum(alloc[f][r]*cph[r] for r in rnames) for f in fnames}
     uncov    = {f:max(demand[f]-coverage[f], 0.0) for f in fnames}
-    tier_fill= {f:{"t1":float(value(t1[f]) or 0),"t2":float(value(t2[f]) or 0),
-                   "t3":float(value(t3[f]) or 0),
-                   "t1_cap":tier1_cap[f],"t2_cap":tier2_cap[f],"t3_cap":tier3_cap[f],
-                   "min_resp":min_resp[f]} for f in fnames}
+    diagnostics = {f: {} for f in fnames}
 
-    return alloc, coverage, cost_h, LpStatus[m.status], value(m.objective), uncov, demand, tier_fill
-
+    return alloc, coverage, cost_h, LpStatus[m.status], value(m.objective), uncov, demand, diagnostics
 
 # ════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -559,14 +528,14 @@ asset_scores  = compute_asset_scores(fires, assets, spread_graphs) if use_assets
 fires_scored  = compute_risk(fires)
 terrain_scores = compute_terrain_scores_dash(fires_scored)
 
-# Single optimizer: v5 resource-hours + minimum response + diminishing returns
-alloc_v5, coverage_v5, horizon_cost, ip_status_v5, obj_val_v5, uncov_v5, demand_map_v5, tier_fill = run_ip_v5(
+# Single optimizer: resource-hours + terrain-adjusted capacity + nonlinear size effectiveness
+alloc_opt, coverage_opt, horizon_cost, ip_status, obj_val, uncov, demand_map_opt, diagnostics = run_optimizer(
     fires_scored, resources, budget, asset_scores, horizon_hours, terrain_scores
 )
 
-demand_map       = demand_map_v5
-alloc            = alloc_v5      # alias used in Tab 3 baseline comparisons
-coverage         = coverage_v5   # alias
+demand_map       = demand_map_opt
+alloc            = alloc_opt      # alias used in Tab 3 baseline comparisons
+coverage         = coverage_opt   # alias
 total_cost       = sum(horizon_cost.values())
 budget_remaining = budget - total_cost
 fire_order       = fires_scored.sort_values("priority_rank")["fire_name"].tolist()
@@ -593,7 +562,7 @@ h4.metric("Horizon", f"{horizon_hours}h")
 h5.metric("Budget", f"${budget:,}")
 h6.metric("Cost over horizon", f"${total_cost:,.0f}", f"{total_cost/budget*100:.0f}% used")
 h7.metric("Budget remaining", f"${budget_remaining:,.0f}")
-h8.metric("Solver", ip_status_v5)
+h8.metric("Solver", ip_status)
 
 top = fires_scored.sort_values("priority_rank").iloc[0]
 if use_assets:
@@ -650,20 +619,15 @@ with tab1:
         beh_cls  = f"tag-{beh.lower()}" if beh.lower() in ["active","minimal","moderate","extreme"] else "tag-other"
         cpx_tag  = '<span class="tag tag-t1">Type 1</span>' if "Type 1" in cpx else ""
         ts        = terrain_scores.get(f, 0.5)
-        cov_v5    = coverage_v5[f]
-        dem_v5    = demand_map_v5.get(f, dem)
-        useful_v5 = min(cov_v5, dem_v5)
-        dem_pct   = min(useful_v5/dem_v5*100, 100) if dem_v5 > 0 else 0
+        cov_opt    = coverage_opt[f]
+        dem_opt    = demand_map_opt.get(f, dem)
+        useful_opt = min(cov_opt, dem_opt)
+        dem_pct   = min(useful_opt/dem_opt*100, 100) if dem_opt > 0 else 0
         terrain_lbl = ("⛰ Steep/Remote" if ts < 0.35
                        else "〰 Moderate" if ts < 0.65 else "✅ Accessible")
         rh_parts  = [f"{v}h {r.split('(')[0].strip()}"
-                     for r, v in alloc_v5[f].items() if v > 0]
+                     for r, v in alloc_opt[f].items() if v > 0]
         dispatch  = ", ".join(rh_parts) or "monitor only"
-        tf        = tier_fill.get(f, {})
-        mr        = tf.get("min_resp", 0)
-        t1f,t2f,t3f = tf.get("t1",0), tf.get("t2",0), tf.get("t3",0)
-        t1c,t2c,t3c = tf.get("t1_cap",0), tf.get("t2_cap",0), tf.get("t3_cap",0)
-
         with cols[i]:
             st.markdown(f"""
             <div class="fire-card" style="border-top-color:{color};">
@@ -676,9 +640,8 @@ with tab1:
                 <span class="tag {beh_cls}">{beh}</span>{cpx_tag}
               </div>
               <div class="fire-stat">
-                📍 {dem_v5:,.0f} ac demand (min: {mr:.0f} ac)<br>
-                ✅ {dem_pct:.0f}% demand met ({useful_v5:,.0f} ac)<br>
-                T1:{t1f:.0f}/{t1c:.0f} · T2:{t2f:.0f}/{t2c:.0f} · T3:{t3f:.0f}/{t3c:.0f}<br>
+                📍 {dem_opt:,.0f} ac 6h response demand<br>
+                ✅ {dem_pct:.0f}% demand met ({useful_opt:,.0f} ac)<br>
                 {terrain_lbl} (access={ts:.2f})<br>
                 💰 ${horizon_cost[f]:,.0f} over {horizon_hours}h<br>
                 🚒 {dispatch}
@@ -691,9 +654,9 @@ with tab1:
 
     st.markdown("<br>", unsafe_allow_html=True)
     s1, s2, s3, s4, s5 = st.columns(5)
-    total_rh = sum(sum(alloc_v5[f].values()) for f in fire_order)
-    avg_cov  = np.mean([min(min(coverage_v5[f], demand_map_v5.get(f,1))/demand_map_v5.get(f,1)*100, 100)
-                        for f in fire_order if demand_map_v5.get(f,0) > 0])
+    total_rh = sum(sum(alloc_opt[f].values()) for f in fire_order)
+    avg_cov  = np.mean([min(min(coverage_opt[f], demand_map_opt.get(f,1))/demand_map_opt.get(f,1)*100, 100)
+                        for f in fire_order if demand_map_opt.get(f,0) > 0])
     with s1:
         st.markdown(f'<div class="stat-row"><div class="stat-val">${total_cost:,.0f}</div>'
                     f'<div class="stat-label">Cost over {horizon_hours}h horizon</div></div>', unsafe_allow_html=True)
@@ -707,8 +670,8 @@ with tab1:
         st.markdown(f'<div class="stat-row"><div class="stat-val">{avg_cov:.0f}%</div>'
                     f'<div class="stat-label">Avg response demand met</div></div>', unsafe_allow_html=True)
     with s5:
-        st.markdown(f'<div class="stat-row"><div class="stat-val">{obj_val_v5:,.0f}</div>'
-                    f'<div class="stat-label">IP objective (v5)</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-row"><div class="stat-val">{obj_val:,.0f}</div>'
+                    f'<div class="stat-label">IP objective</div></div>', unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### Dispatch table (resource-hours)")
@@ -716,14 +679,14 @@ with tab1:
     dispatch_rows = []
     for f in sorted_names:
         rank = int(fires_scored.loc[fires_scored["fire_name"]==f, "priority_rank"].values[0])
-        dem  = demand_map_v5.get(f, float(fires_scored.loc[fires_scored["fire_name"]==f,"discovery_acres"].values[0]))
-        cov  = coverage_v5[f]
+        dem  = demand_map_opt.get(f, float(fires_scored.loc[fires_scored["fire_name"]==f,"discovery_acres"].values[0]))
+        cov  = coverage_opt[f]
         ts   = terrain_scores.get(f, 0.5)
         row_d = {"Rank": f"#{rank}", "Fire": f,
                  "Risk Score": f"{fires_scored.loc[fires_scored['fire_name']==f,'risk_score_100'].values[0]:.1f}",
                  "Terrain Access": f"{ts:.2f}"}
         for r in rnames:
-            v = alloc_v5[f].get(r, 0)
+            v = alloc_opt[f].get(r, 0)
             row_d[f"{r.split('(')[0].strip()} (h)"] = v if v > 0 else "—"
         row_d["Demand (ac)"]            = f"{dem:,.0f}"
         row_d["Response demand met"]    = f"{min(min(cov,dem)/dem*100,100):.0f}%" if dem > 0 else "—"
@@ -813,11 +776,13 @@ with tab2:
     st.markdown("---")
     st.markdown("### Objective breakdown — suppression cost vs residual damage")
     st.caption(
-        f"Both terms are in $/day equivalent. "
-        f"Suppression cost = resource-hours × hourly rate. "
+        f"Objective: minimize suppression cost + λ × residual damage (both in $ equivalent). "
+        f"Suppression cost = Σ resources × cost/day. "
         f"Residual damage = λ × (danger/100) × (asset/10) × uncovered acres × $500/acre. "
         f"λ={int(LAMBDA_DAMAGE)} (risk-aversion multiplier). "
-        f"$500/acre = USFS average wildfire damage calibration."
+        f"$500/acre = USFS average wildfire damage calibration. "
+        f"Demand = 6h response demand (incident_size_6h) when available, "
+        f"otherwise incident size or discovery acres."
     )
 
     diag_rows = []
@@ -825,7 +790,7 @@ with tab2:
     for f in sorted_names:
         danger_f = float(fires_scored.loc[fires_scored["fire_name"]==f, "risk_score_100"].values[0])
         asset_f  = asset_scores.get(f, 5.0) if asset_scores else 5.0
-        uncov_f  = uncov_v5.get(f, 0.0)
+        uncov_f  = uncov.get(f, 0.0)
         suppress = horizon_cost[f]
         resid    = LAMBDA_DAMAGE * (danger_f/100.0) * (asset_f/10.0) * uncov_f * DAMAGE_COST_PER_ACRE
         total_suppress += suppress
@@ -845,7 +810,7 @@ with tab2:
     d1, d2, d3 = st.columns(3)
     d1.metric("Suppression cost", f"${total_suppress:,.0f}", f"{total_suppress/budget*100:.0f}% of budget")
     d2.metric("Residual damage (λ-weighted)", f"${total_resid:,.0f}")
-    d3.metric("Total objective", f"${obj_val_v5:,.0f}")
+    d3.metric("Total objective", f"${obj_val:,.0f}")
 
     st.markdown("---")
     st.markdown("### Asset layer impact on allocation")
@@ -855,8 +820,8 @@ with tab2:
         "The table compares uncovered acres and residual damage with and without the asset layer."
     )
 
-    _, cov_no, _, _, _, uncov_no, _, _ = run_ip_v5(fires_scored, resources, budget, None, horizon_hours, terrain_scores)
-    _, cov_as, _, _, _, uncov_as, _, _ = run_ip_v5(fires_scored, resources, budget, asset_scores, horizon_hours, terrain_scores)
+    _, cov_no, _, _, _, uncov_no, _, _ = run_optimizer(fires_scored, resources, budget, None, horizon_hours, terrain_scores)
+    _, cov_as, _, _, _, uncov_as, _, _ = run_optimizer(fires_scored, resources, budget, asset_scores, horizon_hours, terrain_scores)
 
     cmp_rows = []
     for f in sorted_names:
@@ -1000,11 +965,13 @@ with tab3:
 
     danger_map = dict(zip(fnames, fires_scored["risk_score_100"]))
 
-    # Baselines use resource-hours × aph to compute coverage (consistent with v5 optimizer)
+    # Baselines use resource-hours × aph to compute coverage (consistent with optimizer)
     max_rh_base = {r: ua_map[r] * horizon_hours for r in rnames}
 
     def cov_from_alloc(alloc_d, f):
-        return sum(alloc_d[f].get(r,0) * aph_map[r] for r in rnames)
+        dem = demand_map.get(f, 0)
+        size_eff = 1.0 / (1.0 + 1.25e-4 * dem)   # same default K_SIZE as optimizer
+        return sum(alloc_d[f].get(r, 0) * aph_map[r] * size_eff for r in rnames)
 
     def total_avg_cov(alloc_d):
         total = 0
@@ -1068,7 +1035,7 @@ with tab3:
                 rem_budget3 -= per_fire * cph_map[r]
 
     baselines = {
-        "🏆 IP Optimizer (ours)" : alloc_v5,
+        "🏆 IP Optimizer (ours)" : alloc_opt,
         "Risk-score proportional": risk_alloc,
         "Acreage proportional"   : size_alloc,
         "Equal split"            : equal_alloc,
@@ -1090,8 +1057,8 @@ with tab3:
     st.dataframe(pd.DataFrame(baseline_rows), hide_index=True, use_container_width=True)
     st.caption(
         "Risk-weighted response demand met shows whether resources went to the most dangerous fires. "
-        "The IP objective minimizes suppression cost + λ × tier-weighted residual damage — "
-        "risk-weighted demand met is an evaluation metric, not what the optimizer directly maximizes."
+        "The IP objective minimizes suppression cost + λ × risk-weighted residual damage. "
+        "Risk-weighted demand met is an evaluation metric, not the optimizer objective."
     )
 
     st.markdown("---")
@@ -1142,8 +1109,8 @@ with tab4:
     st.markdown("### How robust is the recommendation?")
     st.caption(
         "Two key assumptions are tested here: the budget for planning horizon (an operational constraint) "
-        "and λ (a risk-preference parameter). All runs use the v5 optimizer. "
-        "ranges, the allocation is robust to these choices."
+        "and λ (a risk-preference parameter). All runs use the optimizer. "
+        "If the allocation remains stable across these ranges, the recommendation is robust to these assumptions."
     )
 
     st.markdown("#### Budget for planning horizon — sensitivity")
@@ -1157,7 +1124,7 @@ with tab4:
     sensitivity  = {f: [] for f in fires_scored["fire_name"]}
 
     for b in budget_steps:
-        _, cov_b, _, _, _, _, dem_b, _ = run_ip_v5(
+        _, cov_b, _, _, _, _, dem_b, _ = run_optimizer(
             fires_scored, resources, b, asset_scores, horizon_hours, terrain_scores)
         for f in fires_scored["fire_name"]:
             dem = dem_b.get(f, 1)
@@ -1201,7 +1168,7 @@ with tab4:
     lam_sens    = {f: [] for f in fnames}
 
     for lam in lambda_vals:
-        _, cov_l, _, _, _, _, dem_l, _ = run_ip_v5(
+        _, cov_l, _, _, _, _, dem_l, _ = run_optimizer(
             fires_scored, resources, budget, asset_scores,
             horizon_hours, terrain_scores, lam=lam)
         for f in fires_scored["fire_name"]:
@@ -1233,13 +1200,13 @@ with tab4:
     st.plotly_chart(fig_lam, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("#### Planning horizon — response demand met (v5)")
-    st.caption(f"How does response demand met change as the planning horizon shifts? Current: {horizon_hours}h. Uses unified v5 optimizer.")
+    st.markdown("#### Planning horizon — response demand met")
+    st.caption(f"How does response demand met change as the planning horizon shifts? Current: {horizon_hours}h. Uses unified optimizer.")
 
     horizon_steps = [2, 3, 4, 6, 8, 10, 12]
     hor_sens = {f: [] for f in fnames}
     for h in horizon_steps:
-        _, cov_h, _, _, _, _, dem_h, _ = run_ip_v5(fires_scored, resources, budget,
+        _, cov_h, _, _, _, _, dem_h, _ = run_optimizer(fires_scored, resources, budget,
                                                    asset_scores, h, terrain_scores)
         for f in fnames:
             dem = dem_h.get(f, 1)
