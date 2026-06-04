@@ -34,11 +34,11 @@ FIRES_CSV     = "wildfire_data/scenario_fires.csv"
 RESOURCES_CSV = "wildfire_data/resources.csv"
 # Budget calibration: with 1 air tanker ($40k), 3 helicopters ($90k), and scarce ground resources,
 # $150k creates genuine prioritization tension — not every fire can receive aviation.
-DAILY_BUDGET  = 150_000
+DAILY_BUDGET  = 950_000
 
 # Optimizer: Planning-horizon formulation
 PLANNING_HORIZON_HOURS  = 6      # hours — replaces "daily" framing in run_resource_hour_optimizer
-HORIZON_BUDGET          = 150_000  # budget for the planning horizon (not per day)
+HORIZON_BUDGET          = 950_000  # budget for the planning horizon (not per day)
 
 # Optimizer: Terrain effectiveness
 SLOPE_PENALTY            = 0.60   # fraction lost at 100% slope (ground resources)

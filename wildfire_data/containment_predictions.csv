@@ -1,0 +1,6 @@
+fire_name,severity_tier,demand_6h_ac,actual_personnel,milp_personnel_equiv,p_early_contained_actual,p_early_contained_milp,delta_p,exp_uncontained_dmg_actual,exp_uncontained_dmg_milp,dmg_reduction
+BEACHIE CREEK,HIGH,1800.0,850,20.3,0.2655,0.3594,0.0939,661046,576514,84532
+LIONSHEAD,HIGH,1500.0,820,0.0,0.2693,0.4151,0.1458,548034,438651,109384
+RIVERSIDE,MEDIUM,600.0,600,0.0,0.3236,0.5188,0.1952,202913,144363,58551
+ALMEDA DRIVE,LOW,200.0,480,9.2,0.3595,0.4012,0.0417,64048,59881,4167
+HOLIDAY FARM,MEDIUM,900.0,500,77.3,0.2965,0.3399,0.0434,316570,297023,19547

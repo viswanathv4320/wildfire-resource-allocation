@@ -1,0 +1,25 @@
+{
+  "best_model": "gradient_boosting",
+  "cv_auc": 0.7987176355348624,
+  "cv_brier": 0.1705813254471604,
+  "n_matched": 25312,
+  "feature_cols": [
+    "log_acres",
+    "log_new_acres",
+    "log_wf_fsr",
+    "log_personnel",
+    "log_aerial",
+    "log_cost",
+    "personnel_per_acre",
+    "aerial_per_acre",
+    "cost_per_acre",
+    "zero_resources",
+    "complexity_ord",
+    "log_str_destroyed",
+    "log_str_threatened",
+    "start_year",
+    "discovery_doy",
+    "peak_season",
+    "years_since_2000"
+  ]
+}

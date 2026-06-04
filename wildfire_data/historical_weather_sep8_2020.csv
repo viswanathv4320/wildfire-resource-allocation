@@ -1,0 +1,6 @@
+temperature_c,wind_speed_mps,wind_dir_deg,humidity_pct,source,fire_name,data_source,event_date
+32.0,10.8,75.0,9.0,Abatzoglou et al. 2021 GRL / NWS WAF-D-21-0028.1,BEACHIE CREEK,peer_reviewed_fallback,2020-09-08
+34.0,9.8,65.0,8.0,Abatzoglou et al. 2021 GRL / NCASI 2021,LIONSHEAD,peer_reviewed_fallback,2020-09-08
+31.0,13.4,80.0,10.0,NWS Portland WAF-D-21-0028.1 / Fox12 Weather 2020,RIVERSIDE,peer_reviewed_fallback,2020-09-08
+38.0,14.3,45.0,7.0,NWS Medford Red Flag Warning / NCASI 2021 / OPB 2020,ALMEDA DRIVE,peer_reviewed_fallback,2020-09-08
+33.0,11.2,85.0,9.0,Abatzoglou et al. 2021 GRL / KEZI FireWatch 2021,HOLIDAY FARM,peer_reviewed_fallback,2020-09-08

@@ -1,5 +1,6 @@
-,fire_name,county,fire_lat,fire_lon,discovery_acres,incident_size,fuel_group,temperature_c,wind_speed_mps,wind_dir_deg,humidity_pct,fire_behavior,mgmt_complexity,estimated_cost,terrain_slope_pct,road_distance_km,incident_size_6h
-0,BEACHIE CREEK,Marion,44.8271,-122.2374,100.0,193573.0,timber,38.0,11.2,90.0,12.0,Active,Type 1 Incident,98000000.0,28.0,4.5,1800.0
-1,LIONSHEAD,Jefferson,44.6521,-121.8745,50.0,204469.0,timber,36.0,9.8,85.0,15.0,Minimal,Type 2 Incident,53000000.0,18.0,6.2,1500.0
-2,ALMEDA DRIVE,Jackson,42.3581,-122.8734,10.0,3200.0,grass,41.0,13.4,270.0,8.0,Moderate,Type 1 Incident,23000000.0,5.0,0.8,200.0
-3,RIVERSIDE,Clackamas,45.1234,-121.9876,30.0,138054.0,mixed,35.0,8.1,100.0,18.0,Moderate,Type 3 Incident,14000000.0,22.0,3.1,600.0
+,fire_name,fire_lat,fire_lon,discovery_acres,incident_size,incident_size_6h,final_acres,fire_behavior,mgmt_complexity,fuel_group,terrain_slope_pct,road_distance_km,structures_threatened,temperature_c,wind_speed_mps,wind_dir_deg,humidity_pct,data_source,event_date,note
+Fire 1,BEACHIE CREEK,44.82,-122.188,194000,194000,1800,194000,Active,Type 1 Incident,timber litter,35.0,8.5,0.0,32.0,10.8,75.0,9.0,peer_reviewed_fallback,2020-09-08,Grew 200ac → 194k ac during wind event. Opal Creek Wilderness.
+Fire 2,LIONSHEAD,44.65,-121.83,204000,204000,1500,204000,Minimal,Type 2 Incident,timber litter,28.0,12.0,0.0,34.0,9.8,65.0,8.0,peer_reviewed_fallback,2020-09-08,"East slope Cascades, arid shrub/timber. 16k→204k ac."
+Fire 3,RIVERSIDE,45.12,-121.96,138000,138000,600,138000,Moderate,Type 3 Incident,timber litter,30.0,6.0,0.0,31.0,13.4,80.0,10.0,peer_reviewed_fallback,2020-09-08,Mt. Hood NF. 112k ac in first 30h. Near Highway 26.
+Fire 4,ALMEDA DRIVE,42.212,-122.714,3200,3200,200,3200,Moderate,Type 1 Incident,urban,5.0,0.5,0.0,38.0,14.3,45.0,7.0,peer_reviewed_fallback,2020-09-08,"3,000+ structures destroyed. Medford/Talent/Phoenix corridor. Urban interface."
+Fire 5,HOLIDAY FARM,44.1,-122.38,173000,173000,900,173000,Active,Type 2 Incident,timber litter,32.0,4.0,0.0,33.0,11.2,85.0,9.0,peer_reviewed_fallback,2020-09-08,McKenzie River corridor. Highway 126 threatened.

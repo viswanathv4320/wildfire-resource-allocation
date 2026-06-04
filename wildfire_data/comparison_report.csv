@@ -1,0 +1,6 @@
+fire_name,priority_rank,risk_score,asset_score,demand_6h_ac,milp_coverage_ac,actual_coverage_ac,milp_pct_covered,actual_pct_covered,coverage_gap_ac,milp_cost_6h,actual_cost_6h,cost_diff,milp_residual_dmg,actual_residual_dmg,dmg_reduction
+BEACHIE CREEK,1,76.2,1.02,1800,643.0,154.0,35.7,8.6,489.0,230500,192250.0,38250.0,2248286.0,3198493.0,950207.0
+HOLIDAY FARM,2,71.7,1.28,900,900.0,151.0,100.0,16.7,749.0,637900,171750.0,466150.0,368.0,1719425.0,1719057.0
+ALMEDA DRIVE,3,62.9,10.0,200,200.0,123.0,100.0,61.3,78.0,81300,130250.0,-48950.0,0.0,1218115.0,1218115.0
+RIVERSIDE,4,53.9,1.0,600,0.0,135.0,0.0,22.5,-135.0,0,154750.0,-154750.0,808500.0,626244.0,-182256.0
+LIONSHEAD,5,44.1,1.11,1500,0.0,124.0,0.0,8.3,-124.0,0,175125.0,-175125.0,1835663.0,1683682.0,-151980.0

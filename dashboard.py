@@ -6,7 +6,7 @@ Story:
   Tab 1 — Decision Summary    : What should we do?
   Tab 2 — Why This Allocation : How did the optimizer arrive here?
   Tab 3 — Compare Alternatives: Does IP beat simple rules?
-  Tab 4 — Sensitivity         : How robust is the recommendation?
+  Tab 4 — Robustness & Technical Details : ML model caveats, sensitivity checks, and technical validation
 
 Usage:
     streamlit run dashboard.py
@@ -18,6 +18,7 @@ import numpy as np
 import networkx as nx
 import plotly.graph_objects as go
 import warnings
+import pickle, json, os
 warnings.filterwarnings("ignore")
 from pulp import *
 
@@ -139,9 +140,10 @@ GRID_SIZE = 40; CELL_M = 100
 BEHAVIOR_MAP   = {"Minimal":0.2,"Moderate":0.5,"Active":0.8,"Extreme":1.0}
 COMPLEXITY_MAP = {"Type 1 Incident":1.0,"Type 2 Incident":0.75,
                   "Type 3 Incident":0.5,"Type 4 Incident":0.25,"Type 5 Incident":0.1}
-RANK_COLORS = {1:"#dc2626", 2:"#ea580c", 3:"#ca8a04", 4:"#2563eb"}
+RANK_COLORS = {1:"#dc2626", 2:"#ea580c", 3:"#ca8a04", 4:"#2563eb", 5:"#16a34a"}
 RANK_LABELS = {1:"#1 — Highest Priority", 2:"#2 — High Priority",
-               3:"#3 — Moderate Priority", 4:"#4 — Lowest Priority"}
+               3:"#3 — Moderate Priority", 4:"#4 — Lower Priority",
+               5:"#5 — Lowest Priority"}
 
 # AHP-derived weights (CR=0.0115)
 AHP_W = {"size": 0.0960, "weather": 0.2771, "behavior": 0.4658, "complexity": 0.1611}
@@ -189,7 +191,9 @@ def load_data():
         assets = gpd.read_file("wildfire_data/osm_assets.geojson")
     except Exception:
         assets = None
-    return fires, resources, assets
+    asset_csv    = "wildfire_data/asset_scores.csv"
+    asset_detail = pd.read_csv(asset_csv) if os.path.exists(asset_csv) else None
+    return fires, resources, assets, asset_detail
 
 
 def get_fuel_multiplier(fuel_group, fire_behavior):
@@ -477,7 +481,7 @@ def run_optimizer(fires_df, resources, budget, asset_scores, horizon_hours, terr
 # SIDEBAR
 # ════════════════════════════════════════════════════════════════════════════
 
-fires_raw, resources, assets = load_data()
+fires_raw, resources, assets, asset_detail = load_data()
 
 with st.sidebar:
     st.markdown("## 🔥 Wildfire Triage")
@@ -487,8 +491,8 @@ with st.sidebar:
     st.markdown("### Weather")
     wind_spd = st.slider("Wind speed (m/s)", 0.5, 15.0,
                          float(round(fires_raw["wind_speed_mps"].fillna(5.0).mean(), 1)), 0.1)
-    humidity = st.slider("Relative humidity (%)", 5.0, 95.0, 50.0, 1.0)
-    temp_val = st.slider("Temperature (°C)", 5.0, 45.0, 18.0, 0.5, format="%.1f°C")
+    humidity = st.slider("Relative humidity (%)", 5.0, 95.0, 9.0, 1.0)
+    temp_val = st.slider("Temperature (°C)", 5.0, 45.0, 33.0, 0.5, format="%.1f°C")
 
     st.markdown("---")
     st.markdown("### Planning horizon")
@@ -497,19 +501,13 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Budget for planning horizon")
-    budget = st.slider("Budget ($)", 50_000, 300_000,
-                       150_000, 10_000, format="$%d")
+    budget = st.slider("Budget ($)", 50_000, 1_500_000,
+                       950_000, 10_000, format="$%d")
 
-    st.markdown("---")
-    st.markdown("### Fire Behavior Override")
-    st.caption("Force a behavior to test what-if scenarios.")
-    beh_options = ["actual", "Minimal", "Moderate", "Active", "Extreme"]
     fire_behaviors = {}
     for _, fire in fires_raw.iterrows():
         actual = str(fire.get("fire_behavior", "Minimal") or "Minimal")
-        sel = st.selectbox(fire["fire_name"], beh_options, index=0,
-                           key=f"beh_{fire['fire_name']}")
-        fire_behaviors[fire["fire_name"]] = sel if sel != "actual" else actual
+        fire_behaviors[fire["fire_name"]] = actual
 
     st.markdown("---")
     use_assets = st.checkbox("Include infrastructure value (OSM)", value=True)
@@ -556,23 +554,20 @@ cph_map          = dict(zip(rnames, resources["cost_per_hour"]))
 # PAGE HEADER
 # ════════════════════════════════════════════════════════════════════════════
 
-st.markdown("# 🔥 Wildfire Resource Allocation — Washington State")
-h1,h2,h3,h4,h5,h6,h7,h8 = st.columns(8)
+st.markdown("# 🔥 Wildfire Resource Allocation — Oregon Labor Day Firestorm, Sep 8 2020")
+h1,h2,h3,h4,h5 = st.columns(5)
 h1.metric("Wind", f"{wind_spd} m/s")
-h2.metric("Humidity", f"{humidity:.0f}%")
-h3.metric("Temp", f"{temp_val:.1f}°C")
-h4.metric("Horizon", f"{horizon_hours}h")
-h5.metric("Budget", f"${budget:,}")
-h6.metric("Cost over horizon", f"${total_cost:,.0f}", f"{total_cost/budget*100:.0f}% used")
-h7.metric("Budget remaining", f"${budget_remaining:,.0f}")
-h8.metric("Solver", ip_status)
+h2.metric("Humidity / Temp", f"{humidity:.0f}% RH · {temp_val:.0f}°C")
+h3.markdown(f"<div style='font-size:0.85rem;color:#666;margin-bottom:2px;'>Budget used</div>"f"<div style='font-size:1.5rem;font-weight:600;color:#111;'>${total_cost:,.0f} / ${budget:,.0f}</div>",unsafe_allow_html=True)
+h4.metric("Planning horizon", f"{horizon_hours}h")
+h5.metric("Optimization status", ip_status)
 
 top = fires_scored.sort_values("priority_rank").iloc[0]
 if use_assets:
     insight = (
         f"🔑 <b>{top['fire_name']}</b> is top priority (risk {top['risk_score_100']:.0f}/100). "
-        f"Infrastructure value is active — fires near hospitals, schools, and residential areas "
-        f"score higher in the damage objective. Toggle off in the sidebar to see how the recommended allocation changes."
+        f"The model prioritizes fires where uncovered demand creates the highest combination "
+        f"of fire danger and infrastructure exposure."
     )
 else:
     insight = (
@@ -588,26 +583,305 @@ st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
 # ════════════════════════════════════════════════════════════════════════════
 
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📋  Decision Summary",
-    "📊  Why This Allocation?",
-    "⚖️  Compare Alternatives",
-    "🔬  Sensitivity",
+    "🆚  Actual vs Model",
+    "📊  Why This Recommendation?",
+    "⚖️  Does Optimization Help?",
+    "🔬  Robustness & Technical Details",
 ])
+# tab5/tab6 removed — content consolidated into tabs 3/4
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — DECISION SUMMARY
+# TAB 1 — ACTUAL vs MODEL
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab1:
-    st.markdown("### Priority ranking & recommended allocation")
+    st.markdown("## September 8, 2020 — What Actually Happened vs What the Model Recommends")
+    st.markdown("""
+    On September 8, 2020, five major Oregon fires erupted simultaneously during a historic wind and heat event.
+    National firefighting resources were at maximum scarcity — every engine, crew, and aircraft was being
+    competed for across the western US. This is the story of how resources were actually deployed,
+    and how an optimization model would have allocated the same budget differently.
+    """)
+
+    # ── Load comparison data ──────────────────────────────────────────────
+    comp_path = "wildfire_data/comparison_report.csv"
+    pred_path = "wildfire_data/containment_predictions.csv"
+    comp_available = os.path.exists(comp_path)
+
+    if comp_available:
+        comp = pd.read_csv(comp_path)
+        total_dmg_reduction = (comp["actual_residual_dmg"].sum() -
+                                comp["milp_residual_dmg"].sum())
+        total_milp_cov  = comp["milp_pct_covered"].mean()
+        total_act_cov   = comp["actual_pct_covered"].mean()
+        milp_cost_total = comp["milp_cost_6h"].sum()
+        actual_cost_tot = comp["actual_cost_6h"].sum()
+
+        # ── 4 KPI cards ───────────────────────────────────────────────────
+        st.markdown("### Business impact at a glance")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric(
+            "Estimated damage avoided",
+            f"${total_dmg_reduction:,.0f}",
+            help="Risk-adjusted residual damage reduction: actual deployment minus model allocation. "
+                 "Not a direct property-loss estimate — a risk-weighted proxy based on fire danger, "
+                 "infrastructure exposure, uncovered acres, and $500/ac calibration."
+        )
+        k2.metric(
+            "Model demand covered",
+            f"{total_milp_cov:.1f}%",
+            delta=f"+{total_milp_cov - total_act_cov:.1f}pp vs actual",
+            help="Average % of 6h suppression demand covered across all five fires."
+        )
+        k3.markdown(
+            f"<div style='font-size:0.85rem;color:#666;margin-bottom:4px;'>Budget used</div>"
+            f"<div style='font-size:1.8rem;font-weight:600;color:#111;line-height:1.2;'>"
+            f"${milp_cost_total:,.0f} / $950,000</div>",
+            unsafe_allow_html=True
+        )
+        # Most impactful fire = largest damage reduction
+        best_fire = comp.loc[
+            (comp["actual_residual_dmg"] - comp["milp_residual_dmg"]).idxmax(),
+            "fire_name"]
+        k4.metric(
+            "Most impactful reallocation",
+            best_fire,
+            help="Fire where the model's reallocation reduces estimated damage the most."
+        )
+
+        st.caption(
+            "**Estimated damage avoided** is a risk-adjusted proxy, not a direct property-loss estimate. "
+            "It reflects how much high-risk, high-asset uncovered demand the model eliminates compared to actual deployment. "
+            "Real-world damage depends on many factors this model does not capture."
+        )
+
+        # ── Infrastructure at risk ─────────────────────────────────────────
+        st.markdown("### What's at stake — risk-weighted exposure by fire")
+        st.caption(
+            "Risk-weighted exposure = danger score × asset score × suppression demand × $500/acre (USFS calibration). "
+            "This is what's at stake if a fire is left completely uncovered. "
+            "Almeda Drive is the smallest fire but has the highest infrastructure exposure — "
+            "it burned through Medford, Talent, and Phoenix, destroying 3,000+ structures."
+        )
+
+        # Build exposure table from comparison data
+        exp_rows = []
+        for _, row in comp.sort_values("priority_rank").iterrows():
+            f       = row["fire_name"]
+            ascore  = row["asset_score"]
+            danger  = row["risk_score"] / 100
+            demand  = row["demand_6h_ac"]
+            at_risk = danger * (ascore / 10) * demand * 500
+            # n_assets from asset_detail if available
+            n_assets = "—"
+            if asset_detail is not None:
+                n_col = next((c for c in asset_detail.columns
+                              if "n_asset" in c.lower() or "count" in c.lower()), None)
+                nm_col = next((c for c in asset_detail.columns
+                               if "name" in c.lower() or "fire" in c.lower()), None)
+                if n_col and nm_col:
+                    match = asset_detail[asset_detail[nm_col] == f]
+                    if not match.empty:
+                        n_assets = int(match[n_col].values[0])
+            exp_rows.append({
+                "Fire"                 : f,
+                "Risk score"           : f"{row['risk_score']:.0f}/100",
+                "Asset score"          : f"{ascore:.1f}/10",
+                "OSM features in path" : n_assets,
+                "Risk-weighted exposure ($)" : f"${at_risk:,.0f}",
+            })
+
+        exp_df = pd.DataFrame(exp_rows)
+        st.dataframe(exp_df, hide_index=True, use_container_width=True)
+
+        # Bar chart
+        at_risk_vals = [
+            comp.loc[comp["fire_name"] == r["Fire"], "risk_score"].values[0] / 100
+            * comp.loc[comp["fire_name"] == r["Fire"], "asset_score"].values[0] / 10
+            * comp.loc[comp["fire_name"] == r["Fire"], "demand_6h_ac"].values[0]
+            * 500
+            for _, r in exp_df.iterrows()
+        ]
+        colors = ["#dc2626","#ea580c","#ca8a04","#2563eb","#16a34a"]
+        fig_atr = go.Figure()
+        fig_atr.add_bar(
+            x=exp_df["Fire"], y=at_risk_vals,
+            marker_color=colors[:len(exp_df)],
+            text=[f"${v/1e6:.2f}M" for v in at_risk_vals],
+            textposition="outside"
+        )
+        fig_atr.update_layout(
+            height=300,
+            yaxis=dict(title="Risk-weighted exposure ($)", tickprefix="$"),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
+            font=dict(family="DM Sans", size=12),
+            showlegend=False,
+            margin=dict(l=10, r=10, t=30, b=10),
+        )
+        st.plotly_chart(fig_atr, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Side-by-side comparison table ─────────────────────────────────
+        st.markdown("### Fire-by-fire: actual deployment vs model recommendation")
+        st.caption(
+            "Same budget ($950k), same resource pool (227 engines, 154 crews, 35 helicopters, 10 tankers), "
+            "different allocation decisions. Demand = estimated suppression need in first 6 hours."
+        )
+
+        cmp_rows = []
+        for _, row in comp.sort_values("priority_rank").iterrows():
+            dmg_red = row["actual_residual_dmg"] - row["milp_residual_dmg"]
+            cmp_rows.append({
+                "Fire"                    : row["fire_name"],
+                "Risk score"              : f"{row['risk_score']:.0f}/100",
+                "Asset exposure"          : f"{row['asset_score']:.1f}/10",
+                "Risk-weighted exposure"  : f"${row['risk_score']/100 * row['asset_score']/10 * row['demand_6h_ac'] * 500:,.0f}",
+                "Actual demand covered"   : f"{row['actual_pct_covered']:.0f}%",
+                "Model demand covered"    : f"{row['milp_pct_covered']:.0f}%",
+                "Actual cost (6h)"        : f"${row['actual_cost_6h']:,.0f}",
+                "Model cost (6h)"         : f"${row['milp_cost_6h']:,.0f}",
+                "Est. damage avoided"     : f"${dmg_red:,.0f}",
+            })
+        st.dataframe(pd.DataFrame(cmp_rows), hide_index=True, use_container_width=True)
+
+        st.caption(
+            "**Negative 'Est. damage avoided'** for Riverside and Lionshead means the model "
+            "intentionally accepts more uncovered risk there to redirect resources toward fires "
+            "with higher infrastructure exposure. This is a deliberate triage tradeoff, not a mistake."
+        )
+        # ── Coverage bar chart ────────────────────────────────────────────
+        st.markdown("### How much of each fire's demand was covered?")
+        fig_cmp = go.Figure()
+        fig_cmp.add_bar(
+            name="Model recommendation", x=comp["fire_name"],
+            y=comp["milp_pct_covered"], marker_color="#e05c2d",
+            text=comp["milp_pct_covered"].round(0).astype(str) + "%",
+            textposition="outside"
+        )
+        fig_cmp.add_bar(
+            name="Actual Sep 8 deployment", x=comp["fire_name"],
+            y=comp["actual_pct_covered"], marker_color="#4a90d9",
+            text=comp["actual_pct_covered"].round(0).astype(str) + "%",
+            textposition="outside"
+        )
+        fig_cmp.update_layout(
+            barmode="group", height=360,
+            yaxis=dict(title="% of 6h demand covered", range=[0, 115]),
+            legend=dict(orientation="h", yanchor="top", y=1.12,
+                        xanchor="right", x=1),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
+            font=dict(family="DM Sans", size=12),
+            margin=dict(l=10, r=10, t=50, b=10),
+        )
+        st.plotly_chart(fig_cmp, use_container_width=True)
+
+        # ── Residual damage chart ─────────────────────────────────────────
+        st.markdown("### Estimated risk left uncovered — lower is better")
+        fig_dmg = go.Figure()
+        fig_dmg.add_bar(
+            name="Model recommendation", x=comp["fire_name"],
+            y=comp["milp_residual_dmg"], marker_color="#e05c2d"
+        )
+        fig_dmg.add_bar(
+            name="Actual Sep 8 deployment", x=comp["fire_name"],
+            y=comp["actual_residual_dmg"], marker_color="#4a90d9"
+        )
+        fig_dmg.update_layout(
+            barmode="group", height=340,
+            yaxis=dict(title="Estimated residual damage ($)"),
+            legend=dict(orientation="h", yanchor="top", y=1.12,
+                        xanchor="right", x=1),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
+            font=dict(family="DM Sans", size=12),
+            margin=dict(l=10, r=10, t=50, b=10),
+        )
+        st.plotly_chart(fig_dmg, use_container_width=True)
+
+        # ── ML summary only — chart in Technical Appendix ───────────────
+        if os.path.exists(pred_path):
+            pred_ml = pd.read_csv(pred_path)
+            # Conservative: only fires the model actually sends resources to
+            resource_fires = [f for f in pred_ml["fire_name"]
+                              if sum(alloc_opt.get(f, {}).values()) > 0]
+            conservative_dmg = max(
+                pred_ml[pred_ml["fire_name"].isin(resource_fires)]["dmg_reduction"].sum(), 0
+            )
+            st.info(
+                f"**ML model estimate:** A Gradient Boosting model (CV AUC=0.80) trained on 34,000+ "
+                f"real ICS-209 incidents predicts improved early containment probability under the "
+                f"optimized allocation. Conservative estimate (fires actually receiving resources): "
+                f"**${conservative_dmg:,.0f} expected damage reduction**. "
+                f"Full ML containment chart is in the Robustness & Technical Details tab."
+            )
+
+        # ── Plain-English takeaway ────────────────────────────────────────
+        st.markdown("---")
+        st.info("""
+        **Why does the model allocate differently?**
+
+        The model concentrates resources on fires where uncovered demand creates the highest
+        combination of fire danger + infrastructure at risk. On September 8, Almeda Drive
+        (only 200 acres but burning through Medford's urban corridor) received a 10/10 asset
+        exposure score — the model fully covers it despite its small size.
+        Riverside and Lionshead are remote timber fires with minimal urban exposure — the model
+        accepts zero coverage there and redirects those resources to higher-value targets.
+
+        Real commanders spread resources more evenly across all five fires, which is a
+        defensible strategy under uncertainty. The model's advantage comes from having
+        perfect information about asset exposure and demand — something commanders don't have
+        in real time.
+        """)
+
+        st.caption("""
+        **Important caveats:**
+
+        **Operational constraints not modeled:** Real commanders on September 8, 2020 faced crew fatigue,
+        mandatory rest requirements, road closures, jurisdictional obligations, contract restrictions,
+        life-safety priorities, and real-time weather uncertainty — none of which are in this model.
+
+        **Information advantage:** The model uses post-event information commanders did not have.
+        Asset scores were computed from OSM data after the fact. Weather values come from
+        peer-reviewed post-event analysis, not the imperfect forecasts available that morning.
+        The fire's eventual impact (Almeda Drive destroying 3,000+ structures) was not fully
+        known at dispatch time. The $3.55M damage reduction reflects both better optimization
+        logic AND better information — the two cannot be cleanly separated here.
+
+        This is a decision-support prototype, not proof that commanders made errors.
+        """)
+
+    else:
+        st.warning(
+            "Comparison data not found. Run `python compare_deployment.py` first "
+            "to generate `wildfire_data/comparison_report.csv`."
+        )
+        st.markdown("---")
+        st.markdown("### Model recommendation (comparison data unavailable)")
+        st.caption("Showing optimizer allocation only. Run compare_deployment.py to see actual vs model.")
+
+    # Fire cards and dispatch moved to Tab 2
+    pass
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 2 — WHY THIS ALLOCATION?
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab2:
+    st.markdown("## Model recommendation — fire by fire")
     st.caption(
-        "Fires ranked by composite risk score (AHP-weighted: behavior 46.6%, weather 27.7%, "
-        "complexity 16.1%, size 9.6%). Resources allocated by MILP optimizer minimizing "
-        "suppression cost + λ × residual damage."
+        "This tab explains the model's allocation in detail: how each fire was scored, "
+        "what resources were assigned, and why terrain and asset exposure matter."
     )
 
-    cols = st.columns(4)
+    # ── Fire priority cards ───────────────────────────────────────────────
+    st.markdown("### Priority ranking & resource allocation")
+    st.caption(
+        "Each fire is ranked 1–5 by danger score. The progress bar shows "
+        "how much of the 6-hour suppression demand the model covers."
+    )
+    n_fires_display = len(fires_scored)
+    cols_cards = st.columns(n_fires_display)
     for i, (_, row) in enumerate(fires_scored.sort_values("priority_rank").iterrows()):
         f        = row["fire_name"]
         rank     = int(row["priority_rank"])
@@ -615,36 +889,32 @@ with tab1:
         beh      = str(row.get("fire_behavior","—") or "—")
         cpx      = str(row.get("mgmt_complexity","—") or "—")
         dem      = demand_map.get(f, row["discovery_acres"])
-        cov      = coverage[f]
-        useful   = min(cov, dem)                         # acres actually meeting demand
-        excess   = max(cov - dem, 0)                     # overshoot from lumpy resources
-        dem_pct  = min(useful/dem*100, 100) if dem > 0 else 0
+        ts       = terrain_scores.get(f, 0.5)
+        cov_opt  = coverage_opt[f]
+        dem_opt  = demand_map_opt.get(f, dem)
+        useful_opt = min(cov_opt, dem_opt)
+        dem_pct  = min(useful_opt/dem_opt*100, 100) if dem_opt > 0 else 0
         beh_cls  = f"tag-{beh.lower()}" if beh.lower() in ["active","minimal","moderate","extreme"] else "tag-other"
         cpx_tag  = '<span class="tag tag-t1">Type 1</span>' if "Type 1" in cpx else ""
-        ts        = terrain_scores.get(f, 0.5)
-        cov_opt    = coverage_opt[f]
-        dem_opt    = demand_map_opt.get(f, dem)
-        useful_opt = min(cov_opt, dem_opt)
-        dem_pct   = min(useful_opt/dem_opt*100, 100) if dem_opt > 0 else 0
         terrain_lbl = ("⛰ Steep/Remote" if ts < 0.35
                        else "〰 Moderate" if ts < 0.65 else "✅ Accessible")
-        rh_parts  = [f"{v}h {r.split('(')[0].strip()}"
-                     for r, v in alloc_opt[f].items() if v > 0]
-        dispatch  = ", ".join(rh_parts) or "monitor only"
-        with cols[i]:
+        rh_parts = [f"{v}h {r.split('(')[0].strip()}"
+                    for r, v in alloc_opt[f].items() if v > 0]
+        dispatch = ", ".join(rh_parts) or "monitor only"
+        with cols_cards[i]:
             st.markdown(f"""
             <div class="fire-card" style="border-top-color:{color};">
               <div class="fire-rank-label" style="color:{color};">{RANK_LABELS[rank]}</div>
               <div class="fire-name">{f}</div>
-              <div class="risk-num" style="color:{color};">{row['risk_score_100']:.0f}
+              <div class="risk-num" style="color:{color};">{row["risk_score_100"]:.0f}
                 <span style="font-size:1rem;font-weight:400;color:#aaa;">/100</span>
               </div>
               <div style="margin-top:0.4rem;">
                 <span class="tag {beh_cls}">{beh}</span>{cpx_tag}
               </div>
               <div class="fire-stat">
-                📍 {dem_opt:,.0f} ac 6h response demand<br>
-                ✅ {dem_pct:.0f}% demand met ({useful_opt:,.0f} ac)<br>
+                📍 {dem_opt:,.0f} ac 6h demand<br>
+                ✅ {dem_pct:.0f}% covered ({useful_opt:,.0f} ac)<br>
                 {terrain_lbl} (access={ts:.2f})<br>
                 💰 ${horizon_cost[f]:,.0f} over {horizon_hours}h<br>
                 🚒 {dispatch}
@@ -656,29 +926,10 @@ with tab1:
             """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    s1, s2, s3, s4, s5 = st.columns(5)
-    total_rh = sum(sum(alloc_opt[f].values()) for f in fire_order)
-    avg_cov  = np.mean([min(min(coverage_opt[f], demand_map_opt.get(f,1))/demand_map_opt.get(f,1)*100, 100)
-                        for f in fire_order if demand_map_opt.get(f,0) > 0])
-    with s1:
-        st.markdown(f'<div class="stat-row"><div class="stat-val">${total_cost:,.0f}</div>'
-                    f'<div class="stat-label">Cost over {horizon_hours}h horizon</div></div>', unsafe_allow_html=True)
-    with s2:
-        st.markdown(f'<div class="stat-row"><div class="stat-val">${budget_remaining:,.0f}</div>'
-                    f'<div class="stat-label">Budget remaining</div></div>', unsafe_allow_html=True)
-    with s3:
-        st.markdown(f'<div class="stat-row"><div class="stat-val">{total_rh}</div>'
-                    f'<div class="stat-label">Resource-hours deployed</div></div>', unsafe_allow_html=True)
-    with s4:
-        st.markdown(f'<div class="stat-row"><div class="stat-val">{avg_cov:.0f}%</div>'
-                    f'<div class="stat-label">Avg response demand met</div></div>', unsafe_allow_html=True)
-    with s5:
-        st.markdown(f'<div class="stat-row"><div class="stat-val">{obj_val:,.0f}</div>'
-                    f'<div class="stat-label">IP objective</div></div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.markdown("### Dispatch table (resource-hours)")
-    st.caption("Values show resource-hours assigned. e.g. '4 Air Tanker' = 4 tanker-hours over the planning horizon.")
+    # ── Dispatch detail table ─────────────────────────────────────────────
+    st.markdown("### Exactly what gets sent where")
+    st.caption("Resource-hours = how long each resource type is assigned to each fire. '30h Air Tanker' means a tanker works that fire for 30 hours.")
     dispatch_rows = []
     for f in sorted_names:
         rank = int(fires_scored.loc[fires_scored["fire_name"]==f, "priority_rank"].values[0])
@@ -691,15 +942,14 @@ with tab1:
         for r in rnames:
             v = alloc_opt[f].get(r, 0)
             row_d[f"{r.split('(')[0].strip()} (h)"] = v if v > 0 else "—"
-        row_d["Demand (ac)"]            = f"{dem:,.0f}"
-        row_d["Response demand met"]    = f"{min(min(cov,dem)/dem*100,100):.0f}%" if dem > 0 else "—"
-        row_d["Capacity assigned (ac)"] = f"{cov:,.0f}"
-        row_d["Unmet demand (ac)"]      = f"{max(dem-cov,0):,.0f}"
+        row_d["Demand (ac)"]           = f"{dem:,.0f}"
+        row_d["Demand covered"]        = f"{min(min(cov,dem)/dem*100,100):.0f}%" if dem > 0 else "—"
+        row_d["Unmet demand (ac)"]     = f"{max(dem-cov,0):,.0f}"
         row_d[f"Cost ({horizon_hours}h)"] = f"${horizon_cost[f]:,.0f}"
         dispatch_rows.append(row_d)
     st.dataframe(pd.DataFrame(dispatch_rows), hide_index=True, use_container_width=True)
 
-    with st.expander("Terrain accessibility detail"):
+    with st.expander("Why does terrain matter?"):
         t_rows = []
         for _, row in fires_scored.sort_values("priority_rank").iterrows():
             name  = row["fire_name"]
@@ -710,9 +960,9 @@ with tab1:
             t_rows.append({"Fire": name, "Slope (%)": f"{slope:.0f}", "Road dist (km)": f"{road:.1f}",
                            "Access score": f"{ts:.2f}", "Ground eff": f"{ground_eff:.0%}", "Air eff": "100%"})
         st.dataframe(pd.DataFrame(t_rows), hide_index=True, use_container_width=True)
-        st.caption("Ground effectiveness = fraction of nominal acres/hour that ground resources deliver on this terrain. Air resources unaffected.")
+        st.caption("Steep terrain and long road distances reduce how effective ground crews are. Helicopters and tankers are unaffected.")
 
-    with st.expander("Component scores (technical detail)"):
+    with st.expander("Full scoring breakdown (technical)"):
         comp_cols = ["fire_name","priority_rank","risk_score_100",
                      "size_score","weather_score","behavior_score","complexity_score",
                      "humidity_risk","wind_risk","temp_risk"]
@@ -720,13 +970,8 @@ with tab1:
         display_df.columns = [c.replace("_"," ").title() for c in display_df.columns]
         st.dataframe(display_df, hide_index=True, use_container_width=True)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 2 — WHY THIS ALLOCATION?
-# ─────────────────────────────────────────────────────────────────────────────
-
-with tab2:
-    st.markdown("### What is driving each fire's risk score?")
+    st.markdown("---")
+    st.markdown("### Why did each fire get the score it did?")
     st.caption(
         "Stacked bars show each factor's absolute contribution to the danger score (0–100). "
         "Score = component × AHP weight × 100. Max possible = 100 (all components at ceiling). "
@@ -766,7 +1011,7 @@ with tab2:
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
         font=dict(family="DM Sans", size=12, color="#1a1a1a"),
         legend=dict(traceorder="reversed", orientation="h",
-                    yanchor="bottom", y=1.02, xanchor="left", x=0, font_size=11),
+                    yanchor="top", y=1.12, xanchor="right", x=1, font_size=11),
         margin=dict(l=10, r=10, t=60, b=10),
         xaxis=dict(gridcolor="#f0f0f0", linecolor="#e5e5e5"),
         yaxis=dict(gridcolor="#f0f0f0", linecolor="#e5e5e5",
@@ -777,180 +1022,143 @@ with tab2:
     st.plotly_chart(fig_risk, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### Objective breakdown — suppression cost vs residual damage")
-    st.caption(
-        f"Objective: minimize suppression cost + λ × residual damage (both in $ equivalent). "
-        f"Suppression cost = Σ resources × cost/day. "
-        f"Residual damage = λ × (danger/100) × (asset/10) × uncovered acres × $500/acre. "
-        f"λ={int(LAMBDA_DAMAGE)} (risk-aversion multiplier). "
-        f"$500/acre = USFS average wildfire damage calibration. "
-        f"Demand = 6h response demand (incident_size_6h) when available, "
-        f"otherwise incident size or discovery acres."
-    )
-
-    diag_rows = []
-    total_suppress, total_resid = 0, 0
-    for f in sorted_names:
-        danger_f = float(fires_scored.loc[fires_scored["fire_name"]==f, "risk_score_100"].values[0])
-        asset_f  = asset_scores.get(f, 5.0) if asset_scores else 5.0
-        uncov_f  = uncov.get(f, 0.0)
-        suppress = horizon_cost[f]
-        resid    = LAMBDA_DAMAGE * (danger_f/100.0) * (asset_f/10.0) * uncov_f * DAMAGE_COST_PER_ACRE
-        total_suppress += suppress
-        total_resid    += resid
-        diag_rows.append({
-            "Fire"                  : f,
-            "Danger/100"            : f"{danger_f/100:.3f}",
-            "Asset/10"              : f"{asset_f/10:.2f}",
-            "Uncovered (ac)"        : f"{uncov_f:,.0f}",
-            "Suppress cost ($/d)"   : f"${suppress:,.0f}",
-            "Residual damage ($/d)" : f"${resid:,.0f}",
-            "Obj contribution"      : f"${suppress + resid:,.0f}",
-        })
-
-    st.dataframe(pd.DataFrame(diag_rows), hide_index=True, use_container_width=True)
-
-    d1, d2, d3 = st.columns(3)
-    d1.metric("Suppression cost", f"${total_suppress:,.0f}", f"{total_suppress/budget*100:.0f}% of budget")
-    d2.metric("Residual damage (λ-weighted)", f"${total_resid:,.0f}")
-    d3.metric("Total objective", f"${obj_val:,.0f}")
+    with st.expander("Technical: how did the optimizer trade off cost vs damage?"):
+        st.markdown("#### Optimization objective breakdown")
+        st.caption(
+            f"Objective: minimize suppression cost + λ×residual damage. "
+            f"Residual damage = λ × (danger/100) × (asset/10) × uncovered acres × $500/ac. "
+            f"λ={int(LAMBDA_DAMAGE)}, $500/ac = USFS calibration."
+        )
+        diag_rows = []
+        total_suppress, total_resid = 0, 0
+        for f in sorted_names:
+            danger_f = float(fires_scored.loc[fires_scored["fire_name"]==f, "risk_score_100"].values[0])
+            asset_f  = asset_scores.get(f, 5.0) if asset_scores else 5.0
+            uncov_f  = uncov.get(f, 0.0)
+            suppress = horizon_cost[f]
+            resid    = LAMBDA_DAMAGE * (danger_f/100.0) * (asset_f/10.0) * uncov_f * DAMAGE_COST_PER_ACRE
+            total_suppress += suppress
+            total_resid    += resid
+            diag_rows.append({
+                "Fire"                  : f,
+                "Danger/100"            : f"{danger_f/100:.3f}",
+                "Asset/10"              : f"{asset_f/10:.2f}",
+                "Uncovered (ac)"        : f"{uncov_f:,.0f}",
+                "Suppress cost"         : f"${suppress:,.0f}",
+                "Residual damage penalty": f"${resid:,.0f}",
+                "Total contribution"    : f"${suppress + resid:,.0f}",
+            })
+        st.dataframe(pd.DataFrame(diag_rows), hide_index=True, use_container_width=True)
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Suppression cost", f"${total_suppress:,.0f}", f"{total_suppress/budget*100:.0f}% of budget")
+        d2.metric("Residual damage penalty (λ-weighted)", f"${total_resid:,.0f}")
+        d3.metric("Total objective value", f"${obj_val:,.0f}")
 
     st.markdown("---")
-    st.markdown("### Asset layer impact on allocation")
-    st.caption(
-        "Asset score enters the IP objective as a damage multiplier (danger × asset × uncovered). "
-        "Enabling it shifts resources toward fires threatening hospitals, schools, and residential areas. "
-        "The table compares uncovered acres and residual damage with and without the asset layer."
-    )
+    with st.expander("Optional: simplified exposure footprint per fire"):
+        st.caption(
+            "Shows the wind-driven spread direction and which infrastructure falls in each fire's path. "
+            "This is a directional exposure approximation, not a wildfire forecast. "
+            "Used internally to calculate asset exposure scores."
+        )
+        sel_fire = st.selectbox(
+            "Fire to inspect", sorted_names,
+            format_func=lambda f: f"#{int(fires_scored.loc[fires_scored['fire_name']==f,'priority_rank'].values[0])} {f}"
+        )
+        t_hours  = st.slider("Exposure horizon (hours)", 1, 12, 6, 1, key="spread_t")
+        fire_row = fires_scored[fires_scored["fire_name"] == sel_fire].iloc[0]
+        G_sel    = spread_graphs[sel_fire]
+        ignition = (GRID_SIZE // 2, GRID_SIZE // 2)
+        lengths  = nx.single_source_dijkstra_path_length(G_sel, ignition, weight="weight")
+        arrival  = np.full((GRID_SIZE, GRID_SIZE), np.nan)
+        for (r, c), t in lengths.items():
+            arrival[r, c] = t
 
-    _, cov_no, _, _, _, uncov_no, _, _ = run_optimizer(fires_scored, resources, budget, None, horizon_hours, terrain_scores)
-    _, cov_as, _, _, _, uncov_as, _, _ = run_optimizer(fires_scored, resources, budget, asset_scores, horizon_hours, terrain_scores)
-
-    cmp_rows = []
-    for f in sorted_names:
-        dem    = demand_map.get(f, float(fires_scored.loc[fires_scored["fire_name"]==f,"discovery_acres"].values[0]))
-        danger = float(fires_scored.loc[fires_scored["fire_name"]==f,"risk_score_100"].values[0])
-        ascore = asset_scores.get(f, 5.0) if asset_scores else 5.0
-        cmp_rows.append({
-            "Fire"                      : f,
-            "Danger score"              : f"{danger:.1f}",
-            "Asset score"               : f"{ascore:.1f}",
-            "Coverage (no assets)"      : f"{min(cov_no[f]/dem*100,100):.0f}%",
-            "Coverage (with assets)"    : f"{min(cov_as[f]/dem*100,100):.0f}%",
-            "Residual dmg (no assets)"  : f"${(danger/100)*1.0*uncov_no.get(f,0)*500:,.0f}",
-            "Residual dmg (with assets)": f"${(danger/100)*(ascore/10)*uncov_as.get(f,0)*500:,.0f}",
-        })
-    st.dataframe(pd.DataFrame(cmp_rows), hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-    st.markdown("### Directional spread footprint")
-    st.caption(
-        "Wind-weighted Dijkstra spread model — a local 4 km × 4 km grid (40×40 cells, 100m each) "
-        "centered on the reported fire coordinate. This is not a full incident perimeter map. "
-        "Downwind ~3× faster than upwind. Used internally to identify which assets fall "
-        "within each fire's 12-hour threat envelope."
-    )
-
-    sel_fire = st.selectbox(
-        "Fire to inspect",
-        sorted_names,
-        format_func=lambda f: f"#{int(fires_scored.loc[fires_scored['fire_name']==f,'priority_rank'].values[0])} {f}"
-    )
-    t_hours = st.slider("Exposure horizon (hours)", 1, 12, 6, 1, key="spread_t")
-
-    fire_row = fires_scored[fires_scored["fire_name"] == sel_fire].iloc[0]
-    G_sel    = spread_graphs[sel_fire]
-    ignition = (GRID_SIZE // 2, GRID_SIZE // 2)
-    lengths  = nx.single_source_dijkstra_path_length(G_sel, ignition, weight="weight")
-    arrival  = np.full((GRID_SIZE, GRID_SIZE), np.nan)
-    for (r, c), t in lengths.items():
-        arrival[r, c] = t
-
-    heatmap_z     = np.where(np.isnan(arrival), t_hours*2, np.minimum(arrival, t_hours*1.5))
-    heatmap_z_inv = t_hours*1.5 - heatmap_z
-    heatmap_z_inv = np.where(np.isnan(arrival), 0, heatmap_z_inv)
-
-    fig_heat = go.Figure()
-    fig_heat.add_trace(go.Heatmap(
-        z=heatmap_z_inv,
-        colorscale=[[0.0,"rgba(240,240,240,0.3)"],[0.3,"rgba(255,200,100,0.5)"],
-                    [0.6,"rgba(255,120,40,0.8)"],[1.0,"rgba(180,20,20,1.0)"]],
-        showscale=True,
-        colorbar=dict(
-            title=dict(text="Spread pressure<br>(early = hot)", font=dict(size=10)),
-            tickvals=[], ticktext=[], thickness=12, len=0.6,
-        ),
-        hovertemplate="Row %{y}, Col %{x}<br>Arrival: %{customdata:.1f}h<extra></extra>",
-        customdata=arrival,
-        zmin=0, zmax=t_hours*1.5,
-    ))
-    fig_heat.add_trace(go.Scatter(
-        x=[ignition[1]], y=[ignition[0]], mode="markers",
-        marker=dict(symbol="star", size=14, color="yellow", line=dict(color="black", width=1.5)),
-        name="Ignition", hovertemplate="Ignition<extra></extra>",
-    ))
-
-    wind_from  = float(fire_row.get("wind_dir_deg") or 270)
-    wind_to_r  = np.radians((wind_from + 180) % 360)
-    ax = ignition[1] + 6*np.sin(wind_to_r)
-    ay = ignition[0] - 6*np.cos(wind_to_r)
-    fig_heat.add_annotation(
-        x=ax, y=ay, ax=ignition[1], ay=ignition[0],
-        xref="x", yref="y", axref="x", ayref="y",
-        showarrow=True, arrowhead=3, arrowsize=1.5, arrowwidth=3, arrowcolor="white",
-        text=f"Wind →<br>{wind_spd:.1f} m/s",
-        font=dict(color="white", size=10), bgcolor="rgba(0,0,0,0.5)", borderpad=3,
-    )
-
-    if assets is not None:
-        fire_assets = assets[assets["fire_name"] == sel_fire]
-        if not fire_assets.empty:
-            LAT_PER_M = 1/111_320
-            lon_m     = 1/(111_320*np.cos(np.radians(fire_row["fire_lat"])))
-            centre    = GRID_SIZE//2
-            acols, arows, awts, alabels = [], [], [], []
-            for _, asset in fire_assets.iterrows():
-                dr = (fire_row["fire_lat"] - asset["centroid_lat"]) / (CELL_M*LAT_PER_M)
-                dc = (asset["centroid_lon"] - fire_row["fire_lon"]) / (CELL_M*lon_m)
-                rg, cg = centre+dr, centre+dc
-                if 0 <= rg < GRID_SIZE and 0 <= cg < GRID_SIZE:
-                    arows.append(rg); acols.append(cg)
-                    awts.append(asset.get("asset_weight", 1.0))
-                    for col in ["amenity","building","landuse"]:
-                        if col in asset.index and pd.notna(asset[col]):
-                            alabels.append(str(asset[col])); break
-                    else:
-                        alabels.append("asset")
-            if acols:
-                threatened = [not np.isnan(arrival[int(round(r)),int(round(c))]) and
-                              arrival[int(round(r)),int(round(c))] <= t_hours
-                              for r, c in zip(arows, acols)]
-                fig_heat.add_trace(go.Scatter(
-                    x=acols, y=arows, mode="markers",
-                    marker=dict(symbol="diamond",
-                                size=[max(6, w*2) for w in awts],
-                                color=["rgba(255,50,50,0.9)" if t else "rgba(100,200,100,0.7)"
-                                       for t in threatened],
-                                line=dict(color="white", width=1)),
-                    name="Assets (red=threatened)",
-                    hovertemplate="%{text}<extra></extra>", text=alabels,
-                ))
-
-    fig_heat.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#111",
-        font=dict(family="DM Sans", size=12),
-        xaxis=dict(title="Grid column (E →)", showgrid=False, range=[0,GRID_SIZE], constrain="domain"),
-        yaxis=dict(title="Grid row (N →)", showgrid=False, range=[GRID_SIZE,0],
-                   scaleanchor="x", scaleratio=1),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=10, r=10, t=40, b=10), height=440,
-    )
-    st.plotly_chart(fig_heat, use_container_width=True)
-    fm = get_fuel_multiplier(fire_row.get("fuel_group"), fire_row.get("fire_behavior"))
-    st.caption(
-        f"**{sel_fire}** · fuel multiplier {fm:.1f}× · wind {wind_spd:.1f} m/s from {wind_from:.0f}° · "
-        f"t={t_hours}h footprint shown. Assets within the red zone are included in the damage penalty."
-    )
+        heatmap_z_inv = np.where(
+            np.isnan(arrival), 0,
+            np.maximum(t_hours * 1.5 - np.minimum(arrival, t_hours * 1.5), 0)
+        )
+        fig_heat = go.Figure()
+        fig_heat.add_trace(go.Heatmap(
+            z=heatmap_z_inv,
+            colorscale=[[0.0,"rgba(240,240,240,0.3)"],[0.3,"rgba(255,200,100,0.5)"],
+                        [0.6,"rgba(255,120,40,0.8)"],[1.0,"rgba(180,20,20,1.0)"]],
+            showscale=True,
+            colorbar=dict(title=dict(text="Spread pressure<br>(early = hot)", font=dict(size=10)),
+                          tickvals=[], ticktext=[], thickness=12, len=0.6),
+            hovertemplate="Row %{y}, Col %{x}<br>Arrival: %{customdata:.1f}h<extra></extra>",
+            customdata=arrival, zmin=0, zmax=t_hours*1.5,
+        ))
+        fig_heat.add_trace(go.Scatter(
+            x=[ignition[1]], y=[ignition[0]], mode="markers",
+            marker=dict(symbol="star", size=14, color="yellow",
+                        line=dict(color="black", width=1.5)),
+            name="Ignition",
+        ))
+        wind_from = float(fire_row.get("wind_dir_deg") or 270)
+        wind_to_r = np.radians((wind_from + 180) % 360)
+        ax = ignition[1] + 6 * np.sin(wind_to_r)
+        ay = ignition[0] - 6 * np.cos(wind_to_r)
+        fig_heat.add_annotation(
+            x=ax, y=ay, ax=ignition[1], ay=ignition[0],
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True, arrowhead=3, arrowsize=1.5, arrowwidth=3,
+            arrowcolor="white",
+            text=f"Wind →<br>{wind_spd:.1f} m/s",
+            font=dict(color="white", size=10), bgcolor="rgba(0,0,0,0.5)", borderpad=3,
+        )
+        if assets is not None:
+            fire_assets = assets[assets["fire_name"] == sel_fire]
+            if not fire_assets.empty:
+                LAT_PER_M = 1 / 111_320
+                lon_m   = 1 / (111_320 * np.cos(np.radians(fire_row["fire_lat"])))
+                centre  = GRID_SIZE // 2
+                acols, arows, awts, alabels = [], [], [], []
+                for _, asset in fire_assets.iterrows():
+                    dr = (fire_row["fire_lat"] - asset["centroid_lat"]) / (CELL_M * LAT_PER_M)
+                    dc = (asset["centroid_lon"] - fire_row["fire_lon"]) / (CELL_M * lon_m)
+                    rg, cg = centre + dr, centre + dc
+                    if 0 <= rg < GRID_SIZE and 0 <= cg < GRID_SIZE:
+                        arows.append(rg); acols.append(cg)
+                        awts.append(asset.get("asset_weight", 1.0))
+                        for col in ["amenity", "building", "landuse"]:
+                            if col in asset.index and pd.notna(asset[col]):
+                                alabels.append(str(asset[col])); break
+                        else:
+                            alabels.append("asset")
+                if acols:
+                    threatened = [
+                        not np.isnan(arrival[int(round(r)), int(round(c))]) and
+                        arrival[int(round(r)), int(round(c))] <= t_hours
+                        for r, c in zip(arows, acols)
+                    ]
+                    fig_heat.add_trace(go.Scatter(
+                        x=acols, y=arows, mode="markers",
+                        marker=dict(symbol="diamond",
+                                    size=[max(6, w * 2) for w in awts],
+                                    color=["rgba(255,50,50,0.9)" if t else "rgba(100,200,100,0.7)"
+                                           for t in threatened],
+                                    line=dict(color="white", width=1)),
+                        name="Assets (red=threatened)",
+                        hovertemplate="%{text}<extra></extra>", text=alabels,
+                    ))
+        fig_heat.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#111",
+            font=dict(family="DM Sans", size=12),
+            xaxis=dict(title="Grid column (E →)", showgrid=False,
+                       range=[0, GRID_SIZE], constrain="domain"),
+            yaxis=dict(title="Grid row (N →)", showgrid=False,
+                       range=[GRID_SIZE, 0], scaleanchor="x", scaleratio=1),
+            legend=dict(orientation="h", yanchor="top", y=1.12, xanchor="right", x=1),
+            margin=dict(l=10, r=10, t=40, b=10), height=440,
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+        fm = get_fuel_multiplier(fire_row.get("fuel_group"), fire_row.get("fire_behavior"))
+        st.caption(
+            f"**{sel_fire}** · fuel multiplier {fm:.1f}× · "
+            f"wind {wind_spd:.1f} m/s from {wind_from:.0f}° · "
+            f"t={t_hours}h footprint. Assets within the red zone are included in the damage penalty."
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -958,7 +1166,7 @@ with tab2:
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab3:
-    st.markdown("### Does the IP optimizer outperform simple rules?")
+    st.markdown("### Does the optimizer actually do better than simple approaches?")
     st.caption(
         "All strategies use the same budget and resource pool. "
         "Coverage = acres covered / demand acres. "
@@ -1038,7 +1246,7 @@ with tab3:
                 rem_budget3 -= per_fire * cph_map[r]
 
     baselines = {
-        "🏆 IP Optimizer (ours)" : alloc_opt,
+        "🏆 Optimization model" : alloc_opt,
         "Risk-score proportional": risk_alloc,
         "Acreage proportional"   : size_alloc,
         "Equal split"            : equal_alloc,
@@ -1065,11 +1273,11 @@ with tab3:
     )
 
     st.markdown("---")
-    st.markdown("### Per-fire response demand met by strategy")
+    st.markdown("### Which fires got covered under each strategy?")
 
     fig_comp = go.Figure()
     strategy_colors = {
-        "🏆 IP Optimizer (ours)" : "#dc2626",
+        "🏆 Optimization model" : "#dc2626",
         "Risk-score proportional": "#3b82f6",
         "Acreage proportional"   : "#f59e0b",
         "Equal split"            : "#6b7280",
@@ -1095,7 +1303,7 @@ with tab3:
         barmode="group",
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
         font=dict(family="DM Sans", size=12, color="#1a1a1a"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font_size=11),
+        legend=dict(orientation="h", yanchor="top", y=1.12, xanchor="right", x=1, font_size=11),
         xaxis=dict(gridcolor="#f0f0f0", linecolor="#e5e5e5"),
         yaxis=dict(title="Response demand met (%)", gridcolor="#f0f0f0", linecolor="#e5e5e5",
                    range=[0,105], ticksuffix="%"),
@@ -1109,13 +1317,53 @@ with tab3:
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab4:
-    st.markdown("### How robust is the recommendation?")
+    st.markdown("### Robustness checks & technical details")
     st.caption(
-        "Two key assumptions are tested here: the budget for planning horizon (an operational constraint) "
-        "and λ (a risk-preference parameter). All runs use the optimizer. "
-        "If the allocation remains stable across these ranges, the recommendation is robust to these assumptions."
+        "This section is for technical readers. "
+        "It tests whether the main recommendation holds under different budget assumptions and risk preferences, "
+        "and contains the ML model details and MILP formulation."
     )
 
+    with st.expander("ML Containment Model — early containment probability by fire"):
+        pred_path_t = "wildfire_data/containment_predictions.csv"
+        if os.path.exists(pred_path_t):
+            pred_t = pd.read_csv(pred_path_t)
+            fig_pt = go.Figure()
+            fig_pt.add_bar(
+                name="Optimization model",
+                x=pred_t["fire_name"],
+                y=(pred_t["p_early_contained_milp"] * 100).round(1),
+                marker_color="#e05c2d",
+                text=(pred_t["p_early_contained_milp"]*100).round(1).astype(str)+"%",
+                textposition="outside"
+            )
+            fig_pt.add_bar(
+                name="Actual Sep 8 deployment",
+                x=pred_t["fire_name"],
+                y=(pred_t["p_early_contained_actual"] * 100).round(1),
+                marker_color="#4a90d9",
+                text=(pred_t["p_early_contained_actual"]*100).round(1).astype(str)+"%",
+                textposition="outside"
+            )
+            fig_pt.update_layout(
+                barmode="group", height=320,
+                yaxis=dict(title="P(contained within 3 days) %", range=[0, 65]),
+                legend=dict(orientation="h", yanchor="top", y=1.12,
+                            xanchor="right", x=1),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
+                font=dict(family="DM Sans", size=12),
+                margin=dict(l=10, r=10, t=50, b=10),
+            )
+            st.plotly_chart(fig_pt, use_container_width=True)
+            st.caption(
+                "Gradient Boosting model, CV AUC=0.80, trained on 25,312 PSM-matched incidents (ICS-209-PLUS 1999–2020). "
+                "Lionshead and Riverside receive zero model resources — their predictions are unreliable counterfactuals. "
+                "Focus on Beachie Creek, Holiday Farm, and Almeda Drive for the reliable result."
+            )
+        else:
+            st.info("Run `python containment_model.py` to generate predictions.")
+
+    st.markdown("---")
     st.markdown("#### Budget for planning horizon — sensitivity")
     st.caption(
         "How does per-fire response demand met change as the budget varies? "
@@ -1150,7 +1398,7 @@ with tab4:
     fig_bud.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
         font=dict(family="DM Sans", size=12, color="#1a1a1a"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font_size=11),
+        legend=dict(orientation="h", yanchor="top", y=1.12, xanchor="right", x=1, font_size=11),
         xaxis=dict(title="Budget for planning horizon ($k)", gridcolor="#f0f0f0", linecolor="#e5e5e5",
                    range=[40, 320]),
         yaxis=dict(title="Response demand met (%)", gridcolor="#f0f0f0", linecolor="#e5e5e5",
@@ -1194,7 +1442,7 @@ with tab4:
     fig_lam.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
         font=dict(family="DM Sans", size=12, color="#1a1a1a"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font_size=11),
+        legend=dict(orientation="h", yanchor="top", y=1.12, xanchor="right", x=1, font_size=11),
         xaxis=dict(title="Lambda (λ)", gridcolor="#f0f0f0", linecolor="#e5e5e5"),
         yaxis=dict(title="Response demand met (%)", gridcolor="#f0f0f0", linecolor="#e5e5e5",
                    range=[0,105], ticksuffix="%"),
@@ -1203,7 +1451,7 @@ with tab4:
     st.plotly_chart(fig_lam, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("#### Planning horizon — response demand met")
+    st.markdown("#### Planning horizon sensitivity")
     st.caption(f"How does response demand met change as the planning horizon shifts? Current: {horizon_hours}h. Uses unified optimizer.")
 
     horizon_steps = [2, 3, 4, 6, 8, 10, 12]
@@ -1230,7 +1478,7 @@ with tab4:
     fig_hor.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="white",
         font=dict(family="DM Sans", size=12, color="#1a1a1a"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font_size=11),
+        legend=dict(orientation="h", yanchor="top", y=1.12, xanchor="right", x=1, font_size=11),
         xaxis=dict(title="Planning horizon (hours)", gridcolor="#f0f0f0", linecolor="#e5e5e5"),
         yaxis=dict(title="Response demand met (%)", gridcolor="#f0f0f0", linecolor="#e5e5e5",
                    range=[0, 105], ticksuffix="%"),
@@ -1243,10 +1491,11 @@ with tab4:
 # FOOTER
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 st.markdown("---")
 st.caption(
-    "Pipeline: AHP risk scoring (nonlinear weather) → MILP optimizer (PuLP/CBC) → "
-    "Elliptical Dijkstra asset exposure (OSM). "
-    "Data: NIFC WFIGS · NOAA weather.gov · OpenStreetMap. "
-    "Spread model is a directional exposure approximation, not a wildfire forecast."
+    "Wildfire Resource Allocation Decision Support System · "
+    "Data: ICS-209-PLUS (NIFC) · NOAA weather · OpenStreetMap · SRTM terrain · "
+    "Sep 8 2020 Oregon Labor Day Firestorm scenario · "
+    "This is a prototype decision-support model, not an operational fire command tool."
 )
