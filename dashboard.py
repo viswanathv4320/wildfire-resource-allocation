@@ -141,9 +141,9 @@ BEHAVIOR_MAP   = {"Minimal":0.2,"Moderate":0.5,"Active":0.8,"Extreme":1.0}
 COMPLEXITY_MAP = {"Type 1 Incident":1.0,"Type 2 Incident":0.75,
                   "Type 3 Incident":0.5,"Type 4 Incident":0.25,"Type 5 Incident":0.1}
 RANK_COLORS = {1:"#dc2626", 2:"#ea580c", 3:"#ca8a04", 4:"#2563eb", 5:"#16a34a"}
-RANK_LABELS = {1:"#1 — Highest Priority", 2:"#2 — High Priority",
-               3:"#3 — Moderate Priority", 4:"#4 — Lower Priority",
-               5:"#5 — Lowest Priority"}
+RANK_LABELS = {1:"#1 — Highest Danger", 2:"#2 — High Danger",
+               3:"#3 — Moderate Danger", 4:"#4 — Lower Danger",
+               5:"#5 — Lowest Danger"}
 
 # AHP-derived weights (CR=0.0115)
 AHP_W = {"size": 0.0960, "weather": 0.2771, "behavior": 0.4658, "complexity": 0.1611}
@@ -554,26 +554,26 @@ cph_map          = dict(zip(rnames, resources["cost_per_hour"]))
 # PAGE HEADER
 # ════════════════════════════════════════════════════════════════════════════
 
-st.markdown("# 🔥 Wildfire Resource Allocation — Oregon Labor Day Firestorm, Sep 8 2020")
+st.markdown("# 🔥 Wildfire Resource Allocation: Oregon Labor Day Firestorm, Sep 8 2020")
 h1,h2,h3,h4,h5 = st.columns(5)
 h1.metric("Wind", f"{wind_spd} m/s")
-h2.metric("Humidity / Temp", f"{humidity:.0f}% RH · {temp_val:.0f}°C")
-h3.markdown(f"<div style='font-size:0.85rem;color:#666;margin-bottom:2px;'>Budget used</div>"f"<div style='font-size:1.5rem;font-weight:600;color:#111;'>${total_cost:,.0f} / ${budget:,.0f}</div>",unsafe_allow_html=True)
-h4.metric("Planning horizon", f"{horizon_hours}h")
+h2.metric("Humidity", f"{humidity:.0f}% RH")
+h3.metric("Temp", f"{temp_val:.0f}°C")
+h4.markdown(f"<div style='font-size:0.85rem;color:#666;margin-bottom:2px;'>Budget used</div>"f"<div style='font-size:1.5rem;font-weight:600;color:#111;'>${total_cost:,.0f} / ${budget:,.0f}</div>",unsafe_allow_html=True)
 h5.metric("Optimization status", ip_status)
 
 top = fires_scored.sort_values("priority_rank").iloc[0]
 if use_assets:
     insight = (
-        f"🔑 <b>{top['fire_name']}</b> is top priority (risk {top['risk_score_100']:.0f}/100). "
+        f"🔑 <b>{top['fire_name']}</b> has the highest danger score (risk {top['risk_score_100']:.0f}/100). "
         f"The model prioritizes fires where uncovered demand creates the highest combination "
         f"of fire danger and infrastructure exposure."
     )
 else:
     insight = (
-        f"🔑 <b>{top['fire_name']}</b> is top priority (risk {top['risk_score_100']:.0f}/100) "
-        f"based on fire behavior and weather alone. "
-        f"Enable 'Include infrastructure value' to factor in nearby hospitals and schools."
+        f"🔑 <b>{top['fire_name']}</b> has the highest danger score (risk {top['risk_score_100']:.0f}/100). "
+        f"The model prioritizes fires where uncovered demand creates the highest combination "
+        f"of fire danger and infrastructure exposure."
     )
 st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
 
@@ -596,7 +596,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab1:
-    st.markdown("## September 8, 2020 — What Actually Happened vs What the Model Recommends")
+    st.markdown("## September 8, 2020: What Actually Happened vs What the Model Recommends")
     st.markdown("""
     On September 8, 2020, five major Oregon fires erupted simultaneously during a historic wind and heat event.
     National firefighting resources were at maximum scarcity — every engine, crew, and aircraft was being
@@ -619,17 +619,17 @@ with tab1:
         actual_cost_tot = comp["actual_cost_6h"].sum()
 
         # ── 4 KPI cards ───────────────────────────────────────────────────
-        st.markdown("### Business impact at a glance")
+        st.markdown("### Model results at a glance")
         k1, k2, k3, k4 = st.columns(4)
         k1.metric(
-            "Estimated damage avoided",
+            "Risk-adjusted damage reduced",
             f"${total_dmg_reduction:,.0f}",
             help="Risk-adjusted residual damage reduction: actual deployment minus model allocation. "
                  "Not a direct property-loss estimate — a risk-weighted proxy based on fire danger, "
                  "infrastructure exposure, uncovered acres, and $500/ac calibration."
         )
         k2.metric(
-            "Model demand covered",
+            "Model avg. demand covered",
             f"{total_milp_cov:.1f}%",
             delta=f"+{total_milp_cov - total_act_cov:.1f}pp vs actual",
             help="Average % of 6h suppression demand covered across all five fires."
@@ -651,7 +651,7 @@ with tab1:
         )
 
         st.caption(
-            "**Estimated damage avoided** is a risk-adjusted proxy, not a direct property-loss estimate. "
+            "**Risk-adjusted damage reduction** is a modeled proxy, not a direct property-loss estimate. "
             "It reflects how much high-risk, high-asset uncovered demand the model eliminates compared to actual deployment. "
             "Real-world damage depends on many factors this model does not capture."
         )
@@ -752,10 +752,11 @@ with tab1:
             "with higher infrastructure exposure. This is a deliberate triage tradeoff, not a mistake."
         )
         # ── Coverage bar chart ────────────────────────────────────────────
-        st.markdown("### How much of each fire's demand was covered?")
+        st.markdown("### How much of each fire’s six-hour demand was covered?")
+        st.caption("Same modeled demand, approximately the same $950K resource envelope.")
         fig_cmp = go.Figure()
         fig_cmp.add_bar(
-            name="Model recommendation", x=comp["fire_name"],
+            name="Optimized allocation", x=comp["fire_name"],
             y=comp["milp_pct_covered"], marker_color="#e05c2d",
             text=comp["milp_pct_covered"].round(0).astype(str) + "%",
             textposition="outside"
@@ -868,17 +869,17 @@ with tab1:
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab2:
-    st.markdown("## Model recommendation — fire by fire")
+    st.markdown("## Model recommendation: fire by fire")
     st.caption(
         "This tab explains the model's allocation in detail: how each fire was scored, "
         "what resources were assigned, and why terrain and asset exposure matter."
     )
 
     # ── Fire priority cards ───────────────────────────────────────────────
-    st.markdown("### Priority ranking & resource allocation")
+    st.markdown("### Fire danger ranking & model allocation")
     st.caption(
-        "Each fire is ranked 1–5 by danger score. The progress bar shows "
-        "how much of the 6-hour suppression demand the model covers."
+        "Fires are ranked by danger score; coverage reflects the optimizer’s"
+        " final decision after considering demand, exposure, cost, and resource constraints."
     )
     n_fires_display = len(fires_scored)
     cols_cards = st.columns(n_fires_display)

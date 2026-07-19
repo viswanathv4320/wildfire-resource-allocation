@@ -1,6 +1,36 @@
-wildfire_data/raw/
-cache/
-__pycache__/
-*.pyc
+# macOS
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local caches
+cache/
+.streamlit/secrets.toml
+
+# Environment variables and credentials
+.env
+.env.*
+*.key
+*.pem
+
+# Raw or large datasets
 wildfire_data/raw/
+
+# Trained model binaries
+wildfire_data/models/*.pkl
+
+# IDE files
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
