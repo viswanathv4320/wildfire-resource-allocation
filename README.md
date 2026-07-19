@@ -2,7 +2,7 @@
 
 > **Given limited firefighting resources and multiple simultaneous fires, which fire gets resources first — and does an optimized allocation outperform real-world deployment?**
 
-Built on real incident data from September 8, 2020 — the worst single-day wildfire event in Oregon history. Five fires competed for the same national resource pool during NMAC Preparedness Level 5 (maximum national scarcity). The system compares what commanders actually deployed against what a mathematical optimizer would have recommended under the same budget and resource constraints.
+Built on real incident data from September 8, 2020 — the worst single-day wildfire event in Oregon history. Five simultaneous Oregon fires were modeled as competing for a shared constrained resource pool during NMAC Preparedness Level 5 (maximum national scarcity). The system compares reconstructed historical deployment with what a mathematical optimizer would recommend under approximately the same budget and resource constraints.
 
 ---
 
@@ -19,17 +19,17 @@ This system formalizes that triage decision using real incident data, mathematic
 Most wildfire data science projects stop at prediction — train a model, report accuracy, done. This project connects the full decision chain:
 
 1. **Real scenario** — September 8, 2020 Oregon Labor Day Firestorm, reconstructed from ICS-209-PLUS incident reports and NOAA Sep 8 2020 historical weather
-2. **Risk scoring** — each fire scored 0–100 on behavior, weather, complexity, and size using the Analytic Hierarchy Process (AHP), consistent with NWCG doctrine
+2. **Risk scoring** — each fire scored 0–100 on behavior, weather, complexity, and size using the Analytic Hierarchy Process (AHP), informed by wildfire prioritization principles
 3. **Infrastructure exposure** — OpenStreetMap assets (hospitals, schools, residential areas) scored within each fire's wind-driven spread path
 4. **Resource optimization** — Mixed Integer Linear Program (MILP) allocates engines, helicopters, tankers, and crews to minimize suppression cost + risk-weighted residual damage under budget and supply constraints
-5. **Real-world validation** — optimizer output compared against actual ICS-209 deployment records from September 8, 2020
+5. **Retrospective evaluation** — optimizer output compared against reconstructed ICS-209 deployment records from September 8, 2020
 6. **ML containment model** — Gradient Boosting trained on 25,312 propensity-score-matched historical incidents predicts early containment probability under each allocation
 
 ---
 
 ## September 8, 2020 — The Scenario
 
-Five Oregon fires competed for the same national resource pool on the same day:
+Five Oregon fires were modeled as competing for a shared constrained resource pool on the same day:
 
 | Fire | 6h Demand | Behavior | Complexity | Key fact |
 |------|----------:|----------|------------|----------|
@@ -55,11 +55,11 @@ Sep 8 2020 weather (peer-reviewed: Abatzoglou et al. 2021 GRL, NWS Portland):
 
 | Metric | MILP | Actual Sep 8 |
 |--------|-----:|-------------:|
-| Average demand covered | 34.9% | 13.7% |
+| Total modeled demand covered | 34.9% | 13.7% |
 | Almeda Drive demand covered | 100% | 61.3% |
 | Holiday Farm demand covered | 100% | 16.7% |
 | Estimated residual damage | $3.88M | $7.43M |
-| **Estimated damage reduction** | **$3.55M** | — |
+| **Modeled risk-adjusted damage reduction** | **$3.55M** | — |
 
 The model concentrates resources on fires with the highest combination of danger score and infrastructure exposure, rather than spreading evenly. This is the core triage insight.
 
@@ -72,7 +72,7 @@ The model concentrates resources on fires with the highest combination of danger
 | Training sample | 25,312 PSM-matched incidents |
 | Target | P(contained within first 3 sitrep days) |
 | Base rate | 63.9% |
-| Conservative damage reduction estimate | $108,246 |
+| Exploratory ML-based damage reduction estimate | $108,246 |
 
 The conservative estimate uses only fires that actually receive model resources (Beachie Creek, Holiday Farm, Almeda Drive). Lionshead and Riverside receive zero model resources — their ML predictions are unreliable zero-resource counterfactuals and are excluded from the headline figure.
 
@@ -122,7 +122,8 @@ Layer 4: OSM Asset Exposure
 ML Containment Model
     Gradient Boosting + Propensity Score Matching (PSM)
     PSM matches fires of similar severity but different resource levels
-    to estimate causal effect of day-1 resources on early containment.
+    to reduce observed severity imbalance when examining the relationship
+    between day-1 resources and early containment.
     Features: fire size, spread rate, day-1 resources, complexity,
               structures at risk, seasonality, climate trend
         ↓
@@ -217,6 +218,8 @@ Forest_Fire_Project/
 ├── wildfire_triage.py           # AHP + risk scoring + MILP optimizer + spread model
 ├── compare_deployment.py        # MILP vs actual ICS-209 deployment comparison
 ├── dashboard.py                 # Streamlit interactive dashboard (4 tabs)
+├── archive/
+│   └── washington-prototype/   # Earlier exploratory Washington version
 ├── requirements.txt
 └── README.md
 ```
@@ -284,7 +287,7 @@ The optimization layer is the core contribution. It is not just prediction — i
 
 The ICS-209 comparison gives the project a real-world evaluation story that most portfolio projects lack: the same budget, the same resource pool, a different allocation logic, and a quantified outcome difference.
 
-The ML model adds a data-driven containment probability layer. Its causal identification via propensity score matching is methodologically defensible, but the results should be interpreted carefully given the dominance of seasonal features and the zero-resource counterfactual problem.
+The ML model adds a data-driven containment probability layer. Propensity-score matching reduces observed severity imbalance, but the results remain associational and may still be affected by unmeasured confounding, seasonal dominance, and the zero-resource counterfactual problem.
 
 **What this is:**
 A prototype decision-support tool showing how operations research and machine learning can structure emergency resource allocation under genuine scarcity.
